@@ -296,7 +296,90 @@ def build_user_entitlement_matrix(df: pd.DataFrame):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 3. ORG GRAPH  (reporting hierarchy)
+# 3. TOP TRANID BY POPULATION
+# ──────────────────────────────────────────────────────────────────────────────
+
+def top_tranid_by_population(df: pd.DataFrame, n: int = 50) -> pd.DataFrame:
+    """
+    Return the top-n tranid values ranked by how many distinct employees
+    (ritsid) hold at least one grant with that tranid.
+
+    Each tranid is expanded to its unique (tranid, descrtx, entitlecd, csiid)
+    combinations, with population metrics attached to every row.
+
+    Columns returned
+    ----------------
+    tranid          : the (possibly normalised) tranid value
+    descrtx         : entitlement description
+    entitlecd       : entitlement code (blank when adguid is present)
+    csiid           : application identifier
+    user_count      : distinct ritsid values holding this tranid
+    population_pct  : user_count / total_distinct_employees  (0–100)
+    adguid_null_pct : % of holders where adguid = ""  (hints at physical-only grants)
+
+    Parameters
+    ----------
+    df : merged frame produced by load_data()
+    n  : how many tranid values to include (default 50)
+    """
+    total_users = df["ritsid"].nunique()
+
+    # ── Per-tranid population stats ───────────────────────────────────────
+    base = df[["ritsid", "tranid", "adguid"]].drop_duplicates(
+        subset=["ritsid", "tranid"]
+    )
+
+    user_counts = (
+        base.groupby("tranid")["ritsid"]
+        .nunique()
+        .rename("user_count")
+    )
+
+    adguid_null = (
+        base.groupby("tranid")["adguid"]
+        .apply(lambda s: round(100.0 * s.eq("").sum() / len(s), 1))
+        .rename("adguid_null_pct")
+    )
+
+    stats = (
+        pd.concat([user_counts, adguid_null], axis=1)
+        .reset_index()
+        .sort_values("user_count", ascending=False)
+        .head(n)
+        .assign(population_pct=lambda d: (d["user_count"] / total_users * 100).round(1))
+    )
+
+    top_tranid_set = set(stats["tranid"])
+
+    # ── Unique entitlement combinations for the top-n tranids ────────────
+    ent_cols = ["tranid", "descrtx", "entitlecd", "csiid"]
+    unique_ents = (
+        df[df["tranid"].isin(top_tranid_set)][ent_cols]
+        .drop_duplicates()
+    )
+
+    # ── Join stats onto the expanded entitlement rows ─────────────────────
+    result = (
+        unique_ents
+        .merge(stats[["tranid", "user_count", "population_pct", "adguid_null_pct"]],
+               on="tranid", how="left")
+        .sort_values(["user_count", "tranid", "csiid", "entitlecd"],
+                     ascending=[False, True, True, True])
+        [["tranid", "descrtx", "entitlecd", "csiid",
+          "user_count", "population_pct", "adguid_null_pct"]]
+        .reset_index(drop=True)
+    )
+
+    log.info("Top-%d tranid: highest coverage %.1f%%  lowest %.1f%%  (%d entitlement rows)",
+             n,
+             stats["population_pct"].iloc[0],
+             stats["population_pct"].iloc[-1],
+             len(result))
+    return result
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 4. ORG GRAPH  (reporting hierarchy)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def build_org_graph(df: pd.DataFrame) -> nx.DiGraph:
@@ -880,6 +963,7 @@ def save_outputs(louvain_profiles:       pd.DataFrame,
                  nmf_entitlements:        pd.DataFrame,
                  nmf_scope_profiles:      pd.DataFrame,
                  nmf_scope_members:       pd.DataFrame,
+                 top_tranids:             pd.DataFrame,
                  louvain_assignments:     pd.Series,
                  nmf_assignments:         pd.Series,
                  hierarchy_rows:          list,
@@ -896,6 +980,9 @@ def save_outputs(louvain_profiles:       pd.DataFrame,
 
     # Hierarchy tier grants (Tier 1 = Staff, Tier 2 = Tech Baseline)
     _save(pd.DataFrame(hierarchy_rows), "role_hierarchy_tiers")
+
+    # Top-50 tranid by population coverage
+    _save(top_tranids, "top_tranids")
 
     # Role template outputs
     _save(louvain_profiles,      "louvain_role_profiles")
@@ -985,7 +1072,10 @@ def run_pipeline(cfg: dict = None) -> dict:
     # 2. Matrix
     matrix, user_index, grant_index = build_user_entitlement_matrix(df)
 
-    # 3. Org graph
+    # 3. Top tranid by population
+    top_tranids = top_tranid_by_population(df)
+
+    # 4. Org graph
     org_graph = build_org_graph(df)
 
     # 4. Role hierarchy — identify Tier 1 (Staff) + Tier 2 (Tech Baseline)
@@ -1029,6 +1119,7 @@ def run_pipeline(cfg: dict = None) -> dict:
         nmf_scope_profiles,    nmf_scope_members,
         louvain_assignments,   nmf_assignments,
         hier["hierarchy_rows"],
+        top_tranids,
         cfg,
     )
 
@@ -1070,6 +1161,8 @@ def main():
                         help="Output directory")
     parser.add_argument("--sample", type=int, default=None,
                         help="Limit to N employees (for testing)")
+    parser.add_argument("--top-tranids", type=int, default=None, metavar="N",
+                        help="Run only the top-N tranid report and exit (default 50)")
     args = parser.parse_args()
 
     cfg = CONFIG.copy()
@@ -1079,6 +1172,18 @@ def main():
     cfg["OUTPUT_DIR"]       = args.out
     if args.sample:
         cfg["SAMPLE_SIZE"]  = args.sample
+
+    if args.top_tranids is not None:
+        df = load_data(cfg)
+        n  = args.top_tranids if args.top_tranids > 0 else 50
+        result = top_tranid_by_population(df, n=n)
+        out = Path(cfg["OUTPUT_DIR"])
+        out.mkdir(parents=True, exist_ok=True)
+        ts  = datetime.now().strftime("%Y%m%d_%H%M%S")
+        p   = out / f"top_tranids_{ts}.csv"
+        result.to_csv(p, index=False)
+        log.info("Saved %s  (%d rows)", p, len(result))
+        return
 
     run_pipeline(cfg)
 
