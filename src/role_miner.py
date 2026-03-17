@@ -122,6 +122,24 @@ CONFIG = {
 
     # A scope sub-group must contain at least this many members to be reported.
     "SCOPE_MIN_GROUP_SIZE":  2,
+ 
+    # ── Entitlement normalization (tranid aliasing) ───────────────────────────
+    # Maps regex patterns (matched against tranid) → canonical tranid value.
+    # Use th^is when the same logical access is split across multiple AD groups
+    # due to org size (e.g. NAM\O365-E3-License, -2, -3, -4 all grant the same
+    # access and should be treated as one entitlement during role mining).
+    #
+    # Keys are Python regex full-match patterns; values are the canonical
+    # replacement string.  Patterns are tested in order; first match wins.
+    #
+    # Example:
+    #   r"^NAM\\O365-E3-License(-\d+)?$": r"NAM\O365-E3-License"
+    #   matches  NAM\O365-E3-License
+    #            NAM\O365-E3-License-2
+    #            NAM\O365-E3-License-3  … and normalises all to the base name.
+    "TRANID_ALIASES": {
+        r"^NAM\\O365-E3-License(-\d+)?$": r"NAM\O365-E3-License",
+    },
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -163,6 +181,36 @@ def load_data(cfg: dict) -> pd.DataFrame:
                   source="entitlements CSV")
     _require_cols(emp, ["ritsid", "empid", "dept_mgr_geid"],
                   source="employees CSV")
+
+    # ── Normalise split AD groups → canonical tranid ─────────────────────────
+    aliases = cfg.get("TRANID_ALIASES", {})
+    if aliases:
+        import re
+        def _canonicalize(val):
+            for pattern, replacement in aliases.items():
+                if re.fullmatch(pattern, val):
+                    return re.sub(pattern, replacement, val)
+            return val
+        original = ent["tranid"].copy()
+        ent["tranid"] = ent["tranid"].apply(_canonicalize)
+        changed = (ent["tranid"] != original).sum()
+        if changed:
+            log.info("TRANID_ALIASES: normalised %d tranid values to canonical form", changed)
+            # Pick up descrtx from the canonical (un-aliased) records so all
+            # aliased rows share the same descrtx as the base record.
+            canonical_mask = ent["tranid"] == original
+            canonical_descrtx = (
+                ent[canonical_mask][["tranid", "descrtx"]]
+                .drop_duplicates("tranid")
+                .set_index("tranid")["descrtx"]
+                .to_dict()
+            )
+            aliased_mask = ~canonical_mask
+            ent.loc[aliased_mask, "descrtx"] = (
+                ent.loc[aliased_mask, "tranid"]
+                .map(canonical_descrtx)
+                .fillna(ent.loc[aliased_mask, "descrtx"])
+            )
 
     # ── Apply grant key rule ──────────────────────────────────────────────────
     # adguid="" (empty string after fillna) is treated the same as NULL.
