@@ -123,6 +123,15 @@ CONFIG = {
     # A scope sub-group must contain at least this many members to be reported.
     "SCOPE_MIN_GROUP_SIZE":  2,
  
+    # ── Role hierarchy tiers ──────────────────────────────────────────────
+    # Staff (root): grants where adguid="" AND global prevalence >= threshold.
+    "HIER_STAFF_MIN_PREVALENCE":          0.95,
+
+    # Staff-with-Tech-Access: among adguid-present users, grants whose
+    # prevalence falls within [MIN, MAX] define the tech-baseline parent role.
+    "HIER_TECH_BASELINE_MIN_PREVALENCE":  0.50,
+    "HIER_TECH_BASELINE_MAX_PREVALENCE":  0.80,
+
     # ── Entitlement normalization (tranid aliasing) ───────────────────────────
     # Maps regex patterns (matched against tranid) → canonical tranid value.
     # Use th^is when the same logical access is split across multiple AD groups
@@ -331,7 +340,129 @@ def build_org_graph(df: pd.DataFrame) -> nx.DiGraph:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4. LOUVAIN ROLE MINING
+# 4. ROLE HIERARCHY  (Staff root → Tech Baseline → Business roles)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def discover_hierarchy_grants(df: pd.DataFrame,
+                               matrix: csr_matrix,
+                               user_index: list,
+                               grant_index: list,
+                               cfg: dict) -> dict:
+    """
+    Identify grants belonging to each tier of the role hierarchy and return
+    a residual matrix (with tier-1 and tier-2 grants stripped) for use as
+    the clustering input so that business-role discovery is not dominated by
+    near-universal tech grants.
+
+    Tier 1 — Staff (root)
+        adguid = ""  AND  global prevalence >= HIER_STAFF_MIN_PREVALENCE
+        Typically: building access, site badge — no technology entitlements.
+
+    Tier 2 — Staff with Tech Access (tech baseline)
+        adguid != ""  AND  prevalence among tech users within
+        [HIER_TECH_BASELINE_MIN_PREVALENCE, HIER_TECH_BASELINE_MAX_PREVALENCE]
+        Typically: Domain, password reset, O365, VPN, Remote Access.
+
+    Tier 3 — Business roles (residual)
+        Everything else — fed into Louvain / NMF clustering.
+
+    Returns
+    -------
+    dict with keys:
+        staff_grants         : set of grant_ids in the Staff root tier
+        tech_baseline_grants : set of grant_ids in the Tech Baseline tier
+        residual_matrix      : csr_matrix with Tier-1 + Tier-2 columns removed
+        residual_grant_index : grant_index list filtered to residual grants only
+        hierarchy_rows       : list of dicts for hierarchy_tiers.csv output
+    """
+    staff_min_prev = cfg["HIER_STAFF_MIN_PREVALENCE"]
+    tech_min_prev  = cfg["HIER_TECH_BASELINE_MIN_PREVALENCE"]
+    tech_max_prev  = cfg["HIER_TECH_BASELINE_MAX_PREVALENCE"]
+
+    u_idx   = {u: i for i, u in enumerate(user_index)}
+    n_users = len(user_index)
+
+    # ── Tier 1: Staff root grants ─────────────────────────────────────────
+    no_adguid_users = set(df[df["adguid"].eq("")]["ritsid"].unique())
+    no_adguid_rows  = [u_idx[u] for u in no_adguid_users if u in u_idx]
+
+    global_counts = np.asarray(matrix.sum(axis=0)).flatten()
+    global_prev   = global_counts / n_users
+
+    no_adguid_counts = (
+        np.asarray(matrix[no_adguid_rows, :].sum(axis=0)).flatten()
+        if no_adguid_rows else np.zeros(len(grant_index))
+    )
+
+    staff_mask   = (no_adguid_counts > 0) & (global_prev >= staff_min_prev)
+    staff_grants = {grant_index[j] for j in np.where(staff_mask)[0]}
+    log.info("Hierarchy — Tier 1 Staff root grants    : %d  (global prev ≥ %.0f%%)",
+             len(staff_grants), staff_min_prev * 100)
+
+    # ── Tier 2: Tech Baseline grants ──────────────────────────────────────
+    tech_users = set(df[df["adguid"].ne("")]["ritsid"].unique())
+    tech_rows  = [u_idx[u] for u in tech_users if u in u_idx]
+    n_tech     = len(tech_rows)
+
+    tech_prev = (
+        np.asarray(matrix[tech_rows, :].sum(axis=0)).flatten() / n_tech
+        if tech_rows else np.zeros(len(grant_index))
+    )
+
+    tech_mask            = (~staff_mask
+                            & (tech_prev >= tech_min_prev)
+                            & (tech_prev <= tech_max_prev))
+    tech_baseline_grants = {grant_index[j] for j in np.where(tech_mask)[0]}
+    log.info("Hierarchy — Tier 2 Tech Baseline grants : %d  (tech prev %.0f%%–%.0f%%)",
+             len(tech_baseline_grants), tech_min_prev * 100, tech_max_prev * 100)
+
+    # ── Residual matrix for Tier 3 clustering ────────────────────────────
+    exclude              = staff_grants | tech_baseline_grants
+    keep_cols            = [j for j, g in enumerate(grant_index) if g not in exclude]
+    residual_matrix      = matrix[:, keep_cols].tocsr()
+    residual_grant_index = [grant_index[j] for j in keep_cols]
+    log.info("Hierarchy — Tier 3 residual grants      : %d  (stripped %d)",
+             len(residual_grant_index), len(exclude))
+
+    # ── Build hierarchy_rows for CSV output ───────────────────────────────
+    # Attach descrtx and appname from the first matching row in df
+    grant_meta = (
+        df[["grant_id", "descrtx", "appname"]]
+        .drop_duplicates("grant_id")
+        .set_index("grant_id")
+    )
+
+    hierarchy_rows = []
+    for g in staff_grants:
+        meta = grant_meta.loc[g] if g in grant_meta.index else {}
+        hierarchy_rows.append({
+            "tier":      1,
+            "tier_name": "Staff",
+            "grant_id":  g,
+            "descrtx":   meta.get("descrtx", "") if isinstance(meta, dict) else meta["descrtx"],
+            "appname":   meta.get("appname", "")  if isinstance(meta, dict) else meta["appname"],
+        })
+    for g in tech_baseline_grants:
+        meta = grant_meta.loc[g] if g in grant_meta.index else {}
+        hierarchy_rows.append({
+            "tier":      2,
+            "tier_name": "Staff with Tech Access",
+            "grant_id":  g,
+            "descrtx":   meta.get("descrtx", "") if isinstance(meta, dict) else meta["descrtx"],
+            "appname":   meta.get("appname", "")  if isinstance(meta, dict) else meta["appname"],
+        })
+
+    return {
+        "staff_grants":          staff_grants,
+        "tech_baseline_grants":  tech_baseline_grants,
+        "residual_matrix":       residual_matrix,
+        "residual_grant_index":  residual_grant_index,
+        "hierarchy_rows":        hierarchy_rows,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 5. LOUVAIN ROLE MINING
 # ──────────────────────────────────────────────────────────────────────────────
 
 def run_louvain(matrix: csr_matrix, user_index: list, cfg: dict) -> pd.Series:
@@ -751,6 +882,7 @@ def save_outputs(louvain_profiles:       pd.DataFrame,
                  nmf_scope_members:       pd.DataFrame,
                  louvain_assignments:     pd.Series,
                  nmf_assignments:         pd.Series,
+                 hierarchy_rows:          list,
                  cfg: dict):
     out = Path(cfg["OUTPUT_DIR"])
     out.mkdir(parents=True, exist_ok=True)
@@ -761,6 +893,9 @@ def save_outputs(louvain_profiles:       pd.DataFrame,
             p = out / f"{name}_{ts}.csv"
             df.to_csv(p, index=False)
             log.info("Saved %s  (%d rows)", p, len(df))
+
+    # Hierarchy tier grants (Tier 1 = Staff, Tier 2 = Tech Baseline)
+    _save(pd.DataFrame(hierarchy_rows), "role_hierarchy_tiers")
 
     # Role template outputs
     _save(louvain_profiles,      "louvain_role_profiles")
@@ -853,36 +988,47 @@ def run_pipeline(cfg: dict = None) -> dict:
     # 3. Org graph
     org_graph = build_org_graph(df)
 
-    # 4. Louvain — role templates
-    louvain_assignments = run_louvain(matrix, user_index, cfg)
+    # 4. Role hierarchy — identify Tier 1 (Staff) + Tier 2 (Tech Baseline)
+    #    and strip them from the matrix before clustering so business-role
+    #    discovery is not dominated by near-universal tech grants.
+    log.info("─" * 40)
+    log.info("Role Hierarchy Discovery")
+    log.info("─" * 40)
+    hier = discover_hierarchy_grants(df, matrix, user_index, grant_index, cfg)
+    cluster_matrix      = hier["residual_matrix"]
+    cluster_grant_index = hier["residual_grant_index"]
+
+    # 5. Louvain — role templates (on residual matrix)
+    louvain_assignments = run_louvain(cluster_matrix, user_index, cfg)
     louvain_profiles, louvain_entitlements = analyze_roles(
-        louvain_assignments, df, matrix, user_index, grant_index, cfg, "Louvain"
+        louvain_assignments, df, cluster_matrix, user_index, cluster_grant_index, cfg, "Louvain"
     )
 
-    # 5. NMF — role templates
-    nmf_assignments = run_nmf(matrix, user_index, cfg)
+    # 6. NMF — role templates (on residual matrix)
+    nmf_assignments = run_nmf(cluster_matrix, user_index, cfg)
     nmf_profiles, nmf_entitlements = analyze_roles(
-        nmf_assignments, df, matrix, user_index, grant_index, cfg, "NMF"
+        nmf_assignments, df, cluster_matrix, user_index, cluster_grant_index, cfg, "NMF"
     )
 
-    # 6. Scope discovery — Pass 2
+    # 7. Scope discovery — Pass 2 (also on residual matrix)
     log.info("─" * 40)
     log.info("Pass 2 — Scope Discovery")
     log.info("─" * 40)
     louvain_scope_profiles, louvain_scope_members = discover_scopes(
-        louvain_assignments, df, matrix, user_index, grant_index, cfg, "Louvain"
+        louvain_assignments, df, cluster_matrix, user_index, cluster_grant_index, cfg, "Louvain"
     )
     nmf_scope_profiles, nmf_scope_members = discover_scopes(
-        nmf_assignments, df, matrix, user_index, grant_index, cfg, "NMF"
+        nmf_assignments, df, cluster_matrix, user_index, cluster_grant_index, cfg, "NMF"
     )
 
-    # 7. Save
+    # 8. Save
     save_outputs(
         louvain_profiles,      louvain_entitlements,
         louvain_scope_profiles, louvain_scope_members,
         nmf_profiles,          nmf_entitlements,
         nmf_scope_profiles,    nmf_scope_members,
         louvain_assignments,   nmf_assignments,
+        hier["hierarchy_rows"],
         cfg,
     )
 
