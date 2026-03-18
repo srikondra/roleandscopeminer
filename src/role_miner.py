@@ -40,7 +40,7 @@ warnings.filterwarnings("ignore")
 # ── third-party ───────────────────────────────────────────────────────────────
 import numpy as np
 import pandas as pd
-from scipy.sparse import lil_matrix, csr_matrix
+from scipy.sparse import csr_matrix
 from sklearn.decomposition import NMF
 from sklearn.preprocessing import normalize
 
@@ -82,6 +82,10 @@ CONFIG = {
     # ── Louvain tuning ────────────────────────────────────────────────────────
     "LOUVAIN_RESOLUTION": 1.0,   # higher = more, smaller clusters
     "LOUVAIN_SEED":       42,
+    # Rows of the similarity matrix computed at once.  Each batch uses
+    # batch_size × n_users × 4 bytes of RAM.  At 2 000 × 450 000 that is
+    # ~3.6 GB — safe on a 38 GB machine.  Reduce if you hit memory pressure.
+    "LOUVAIN_BATCH_SIZE": 2000,
 
     # ── NMF tuning ────────────────────────────────────────────────────────────
     # Set to None to auto-detect (uses SVD elbow method).
@@ -123,6 +127,14 @@ CONFIG = {
     # A scope sub-group must contain at least this many members to be reported.
     "SCOPE_MIN_GROUP_SIZE":  2,
  
+    # ── Algorithm switches ────────────────────────────────────────────────
+    # Louvain builds a 450K × 450K user-similarity matrix which requires
+    # significant RAM.  Disable on large datasets (> ~100K employees) unless
+    # you have sufficient memory.  NMF runs on the sparse matrix and is safe
+    # to leave enabled at any scale.
+    "ENABLE_LOUVAIN": True,
+    "ENABLE_NMF":     True,
+
     # ── Role hierarchy tiers ──────────────────────────────────────────────
     # Staff (root): grants where adguid="" AND global prevalence >= threshold.
     "HIER_STAFF_MIN_PREVALENCE":          0.95,
@@ -285,14 +297,17 @@ def build_user_entitlement_matrix(df: pd.DataFrame):
     u_idx  = {u: i for i, u in enumerate(users)}
     g_idx  = {g: i for i, g in enumerate(grants)}
 
-    mat = lil_matrix((len(users), len(grants)), dtype=np.float32)
-    for _, row in df[["ritsid", "grant_id"]].drop_duplicates().iterrows():
-        mat[u_idx[row["ritsid"]], g_idx[row["grant_id"]]] = 1.0
+    pairs = df[["ritsid", "grant_id"]].drop_duplicates()
+    row_idx = pairs["ritsid"].map(u_idx).to_numpy(dtype=np.int32)
+    col_idx = pairs["grant_id"].map(g_idx).to_numpy(dtype=np.int32)
+    data    = np.ones(len(row_idx), dtype=np.float32)
+    mat     = csr_matrix((data, (row_idx, col_idx)),
+                         shape=(len(users), len(grants)))
 
     log.info("Matrix: %d users × %d grants  (density %.3f%%)",
              len(users), len(grants),
              100.0 * mat.nnz / (len(users) * len(grants)))
-    return mat.tocsr(), users, grants
+    return mat, users, grants
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -301,43 +316,55 @@ def build_user_entitlement_matrix(df: pd.DataFrame):
 
 def top_tranid_by_population(df: pd.DataFrame, n: int = 50) -> pd.DataFrame:
     """
-    Return the top-n tranid values ranked by how many distinct employees
-    (ritsid) hold at least one grant with that tranid.
+    Return the top-n grants ranked by how many distinct employees (ritsid)
+    hold them, using the full grant key as the grouping unit.
 
-    Each tranid is expanded to its unique (tranid, descrtx, entitlecd, csiid)
-    combinations, with population metrics attached to every row.
+    Grant key rule (mirrors load_data):
+        adguid IS NULL     →  (csiid, tranid, descrtx, entitlecd)
+        adguid IS NOT NULL →  (csiid, tranid, descrtx)
 
     Columns returned
     ----------------
+    grant_id        : full grant key string
+    csiid           : application identifier
     tranid          : the (possibly normalised) tranid value
     descrtx         : entitlement description
     entitlecd       : entitlement code (blank when adguid is present)
-    csiid           : application identifier
-    user_count      : distinct ritsid values holding this tranid
-    population_pct  : user_count / total_distinct_employees  (0–100)
-    adguid_null_pct : % of holders where adguid = ""  (hints at physical-only grants)
-
-    Parameters
-    ----------
-    df : merged frame produced by load_data()
-    n  : how many tranid values to include (default 50)
+    user_count      : distinct ritsid values holding this grant
+    population_pct  : user_count / total_distinct_ritsid  (0–100)
+    adguid_null_pct : % of holders where adguid = ""
     """
+    # Ensure string comparison works regardless of categorical dtype
+    adguid = df["adguid"].astype(str)
+    no_guid = adguid.eq("")
+
+    # ── Compute grant_id using the grant key rule ─────────────────────────
+    df = df.copy()
+    df["grant_id"] = np.where(
+        no_guid,
+        df["csiid"].astype(str) + "|" + df["tranid"].astype(str) + "|" +
+        df["descrtx"].astype(str) + "|" + df["entitlecd"].astype(str),
+        df["csiid"].astype(str) + "|" + df["tranid"].astype(str) + "|" +
+        df["descrtx"].astype(str),
+    )
+    df["entitlecd_eff"] = np.where(no_guid, df["entitlecd"].astype(str), "")
+
     total_users = df["ritsid"].nunique()
 
-    # ── Per-tranid population stats ───────────────────────────────────────
-    base = df[["ritsid", "tranid", "adguid"]].drop_duplicates(
-        subset=["ritsid", "tranid"]
+    # ── Per-grant population stats ────────────────────────────────────────
+    base = df[["ritsid", "grant_id", "adguid"]].drop_duplicates(
+        subset=["ritsid", "grant_id"]
     )
 
     user_counts = (
-        base.groupby("tranid")["ritsid"]
+        base.groupby("grant_id")["ritsid"]
         .nunique()
         .rename("user_count")
     )
 
     adguid_null = (
-        base.groupby("tranid")["adguid"]
-        .apply(lambda s: round(100.0 * s.eq("").sum() / len(s), 1))
+        base.groupby("grant_id")["adguid"]
+        .apply(lambda s: round(100.0 * s.astype(str).eq("").sum() / len(s), 1))
         .rename("adguid_null_pct")
     )
 
@@ -349,32 +376,29 @@ def top_tranid_by_population(df: pd.DataFrame, n: int = 50) -> pd.DataFrame:
         .assign(population_pct=lambda d: (d["user_count"] / total_users * 100).round(1))
     )
 
-    top_tranid_set = set(stats["tranid"])
+    top_grant_set = set(stats["grant_id"])
 
-    # ── Unique entitlement combinations for the top-n tranids ────────────
-    ent_cols = ["tranid", "descrtx", "entitlecd", "csiid"]
-    unique_ents = (
-        df[df["tranid"].isin(top_tranid_set)][ent_cols]
-        .drop_duplicates()
+    # ── Attach component columns from the first matching raw row ──────────
+    meta_cols = ["grant_id", "csiid", "tranid", "descrtx", "entitlecd_eff"]
+    meta = (
+        df.loc[df["grant_id"].isin(top_grant_set), meta_cols]
+        .drop_duplicates("grant_id")
+        .rename(columns={"entitlecd_eff": "entitlecd"})
     )
 
-    # ── Join stats onto the expanded entitlement rows ─────────────────────
     result = (
-        unique_ents
-        .merge(stats[["tranid", "user_count", "population_pct", "adguid_null_pct"]],
-               on="tranid", how="left")
-        .sort_values(["user_count", "tranid", "csiid", "entitlecd"],
-                     ascending=[False, True, True, True])
-        [["tranid", "descrtx", "entitlecd", "csiid",
+        stats
+        .merge(meta, on="grant_id", how="left")
+        .sort_values("user_count", ascending=False)
+        [["grant_id", "csiid", "tranid", "descrtx", "entitlecd",
           "user_count", "population_pct", "adguid_null_pct"]]
         .reset_index(drop=True)
     )
 
-    log.info("Top-%d tranid: highest coverage %.1f%%  lowest %.1f%%  (%d entitlement rows)",
+    log.info("Top-%d grants: highest coverage %.1f%%  lowest %.1f%%",
              n,
              stats["population_pct"].iloc[0],
-             stats["population_pct"].iloc[-1],
-             len(result))
+             stats["population_pct"].iloc[-1])
     return result
 
 
@@ -552,27 +576,45 @@ def run_louvain(matrix: csr_matrix, user_index: list, cfg: dict) -> pd.Series:
     """
     Build a Jaccard-similarity user graph and run Louvain community detection.
     Returns a pd.Series: ritsid → cluster_id  (string like 'L0', 'L1', …)
+
+    Similarity is computed in row-batches so peak RAM stays at
+    batch_size × n_users × 4 bytes rather than n_users² × 4 bytes.
+    At LOUVAIN_BATCH_SIZE=2000 and 450K users that is ~3.6 GB per batch.
     """
-    log.info("Building user similarity graph for Louvain …")
-    n = matrix.shape[0]
-    # Jaccard similarity via dot product on normalised binary vectors
+    log.info("Building user similarity graph for Louvain (batched) …")
+    n          = matrix.shape[0]
+    batch_size = cfg.get("LOUVAIN_BATCH_SIZE", 2000)
+    k          = min(15, n - 1)
+
+    # Row-normalised matrix for cosine/Jaccard approximation
     norms = np.asarray(matrix.sum(axis=1)).flatten()
     norms[norms == 0] = 1
-    mat_norm = matrix.multiply(1.0 / norms[:, None])
+    mat_norm = matrix.multiply(1.0 / norms[:, None]).tocsr()
 
     G = nx.Graph()
     G.add_nodes_from(range(n))
 
-    # Sparse dot: M_norm × M_norm^T  — keep top-k neighbours per user
-    sim = (mat_norm @ mat_norm.T).tocsr()
-    k   = min(15, n - 1)
-    for i in range(n):
-        row     = sim.getrow(i).toarray().flatten()
-        row[i]  = 0          # no self-loops
-        top_k   = np.argpartition(row, -k)[-k:]
-        for j in top_k:
-            if row[j] > 0:
-                G.add_edge(i, j, weight=float(row[j]))
+    n_batches = (n + batch_size - 1) // batch_size
+    for b in range(n_batches):
+        start = b * batch_size
+        end   = min(start + batch_size, n)
+
+        # sim_batch: (end-start) × n_users  — dense, lives briefly then freed
+        sim_batch = (mat_norm[start:end] @ mat_norm.T).toarray()
+
+        for local_i, i in enumerate(range(start, end)):
+            row        = sim_batch[local_i]
+            row[i]     = 0.0          # no self-loops
+            top_k      = np.argpartition(row, -k)[-k:]
+            for j in top_k:
+                if row[j] > 0:
+                    G.add_edge(i, j, weight=float(row[j]))
+
+        del sim_batch                 # free batch memory immediately
+
+        if (b + 1) % 50 == 0 or (b + 1) == n_batches:
+            log.info("  similarity batch %d/%d  (users %d–%d)",
+                     b + 1, n_batches, start, end - 1)
 
     log.info("Running Louvain (resolution=%.2f) …", cfg["LOUVAIN_RESOLUTION"])
     partition = community_louvain.best_partition(
@@ -997,23 +1039,23 @@ def save_outputs(louvain_profiles:       pd.DataFrame,
     _save(nmf_scope_members,      "nmf_scope_members")
 
     # User-role assignments (both methods side by side)
-    assignments_df = pd.DataFrame({
-        "ritsid":         louvain_assignments.index,
-        "louvain_role":   louvain_assignments.values,
-    })
-    if nmf_assignments is not None:
-        nmf_map = nmf_assignments.to_dict()
-        assignments_df["nmf_role"] = assignments_df["ritsid"].map(nmf_map)
+    base_assignments = louvain_assignments if louvain_assignments is not None else nmf_assignments
+    if base_assignments is not None:
+        assignments_df = pd.DataFrame({"ritsid": base_assignments.index})
+        if louvain_assignments is not None:
+            assignments_df["louvain_role"] = louvain_assignments.values
+        if nmf_assignments is not None:
+            assignments_df["nmf_role"] = assignments_df["ritsid"].map(nmf_assignments.to_dict())
 
-    # Attach louvain scope to assignments where available
-    if louvain_scope_members is not None and not louvain_scope_members.empty:
-        scope_map = (louvain_scope_members
-                     .groupby("ritsid")["scope_id"]
-                     .apply(lambda s: " | ".join(sorted(s.unique())))
-                     .to_dict())
-        assignments_df["louvain_scope"] = assignments_df["ritsid"].map(scope_map)
+        # Attach louvain scope to assignments where available
+        if louvain_scope_members is not None and not louvain_scope_members.empty:
+            scope_map = (louvain_scope_members
+                         .groupby("ritsid")["scope_id"]
+                         .apply(lambda s: " | ".join(sorted(s.unique())))
+                         .to_dict())
+            assignments_df["louvain_scope"] = assignments_df["ritsid"].map(scope_map)
 
-    _save(assignments_df, "user_role_assignments")
+        _save(assignments_df, "user_role_assignments")
 
     # Summary text
     summary_path = out / f"summary_{ts}.txt"
@@ -1023,14 +1065,14 @@ def save_outputs(louvain_profiles:       pd.DataFrame,
         "IGA Role Mining — Run Summary",
         f"Timestamp : {ts}",
         "=" * 60,
-        f"Louvain roles  : {len(louvain_profiles)}",
+        f"Louvain roles  : {len(louvain_profiles) if louvain_profiles is not None else 'disabled'}",
     ]
-    if not louvain_profiles.empty:
+    if louvain_profiles is not None and not louvain_profiles.empty:
         lines.append(f"  Avg members    : {louvain_profiles['member_count'].mean():.1f}")
         lines.append(f"  Avg core grants: {louvain_profiles['core_grant_count'].mean():.1f}")
         lines.append(f"  Scope variants : {n_lou_scopes}")
-    lines += ["", f"NMF roles      : {len(nmf_profiles)}"]
-    if not nmf_profiles.empty:
+    lines += ["", f"NMF roles      : {len(nmf_profiles) if nmf_profiles is not None else 'disabled'}"]
+    if nmf_profiles is not None and not nmf_profiles.empty:
         lines.append(f"  Avg members    : {nmf_profiles['member_count'].mean():.1f}")
         lines.append(f"  Avg core grants: {nmf_profiles['core_grant_count'].mean():.1f}")
         lines.append(f"  Scope variants : {n_nmf_scopes}")
@@ -1089,27 +1131,39 @@ def run_pipeline(cfg: dict = None) -> dict:
     cluster_grant_index = hier["residual_grant_index"]
 
     # 5. Louvain — role templates (on residual matrix)
-    louvain_assignments = run_louvain(cluster_matrix, user_index, cfg)
-    louvain_profiles, louvain_entitlements = analyze_roles(
-        louvain_assignments, df, cluster_matrix, user_index, cluster_grant_index, cfg, "Louvain"
-    )
+    louvain_assignments = louvain_profiles = louvain_entitlements = None
+    louvain_scope_profiles = louvain_scope_members = None
+    if cfg.get("ENABLE_LOUVAIN", False):
+        louvain_assignments = run_louvain(cluster_matrix, user_index, cfg)
+        louvain_profiles, louvain_entitlements = analyze_roles(
+            louvain_assignments, df, cluster_matrix, user_index, cluster_grant_index, cfg, "Louvain"
+        )
+    else:
+        log.info("Louvain disabled (ENABLE_LOUVAIN=False) — skipping")
 
     # 6. NMF — role templates (on residual matrix)
-    nmf_assignments = run_nmf(cluster_matrix, user_index, cfg)
-    nmf_profiles, nmf_entitlements = analyze_roles(
-        nmf_assignments, df, cluster_matrix, user_index, cluster_grant_index, cfg, "NMF"
-    )
+    nmf_assignments = nmf_profiles = nmf_entitlements = None
+    nmf_scope_profiles = nmf_scope_members = None
+    if cfg.get("ENABLE_NMF", True):
+        nmf_assignments = run_nmf(cluster_matrix, user_index, cfg)
+        nmf_profiles, nmf_entitlements = analyze_roles(
+            nmf_assignments, df, cluster_matrix, user_index, cluster_grant_index, cfg, "NMF"
+        )
+    else:
+        log.info("NMF disabled (ENABLE_NMF=False) — skipping")
 
     # 7. Scope discovery — Pass 2 (also on residual matrix)
     log.info("─" * 40)
     log.info("Pass 2 — Scope Discovery")
     log.info("─" * 40)
-    louvain_scope_profiles, louvain_scope_members = discover_scopes(
-        louvain_assignments, df, cluster_matrix, user_index, cluster_grant_index, cfg, "Louvain"
-    )
-    nmf_scope_profiles, nmf_scope_members = discover_scopes(
-        nmf_assignments, df, cluster_matrix, user_index, cluster_grant_index, cfg, "NMF"
-    )
+    if louvain_assignments is not None:
+        louvain_scope_profiles, louvain_scope_members = discover_scopes(
+            louvain_assignments, df, cluster_matrix, user_index, cluster_grant_index, cfg, "Louvain"
+        )
+    if nmf_assignments is not None:
+        nmf_scope_profiles, nmf_scope_members = discover_scopes(
+            nmf_assignments, df, cluster_matrix, user_index, cluster_grant_index, cfg, "NMF"
+        )
 
     # 8. Save
     save_outputs(
@@ -1148,6 +1202,68 @@ def run_pipeline(cfg: dict = None) -> dict:
 # 9. CLI
 # ──────────────────────────────────────────────────────────────────────────────
 
+def load_entitlements_lean(cfg: dict) -> pd.DataFrame:
+    """
+    Lightweight loader for the --top-tranids path.
+
+    Reads only the 6 columns needed by top_tranid_by_population directly
+    from the entitlements CSV — no employee merge, no HR columns.
+    All string columns are cast to Categorical to cut RAM usage by ~70%
+    versus a full object-dtype load.
+    """
+    cols_needed = ["ritsid", "tranid", "descrtx", "entitlecd", "csiid", "adguid"]
+
+    log.info("Lean-loading entitlements (columns: %s) …", ", ".join(cols_needed))
+    ent = pd.read_csv(
+        cfg["CSV_ENTITLEMENTS"],
+        dtype=str,
+        usecols=lambda c: c.strip().lower() in cols_needed,
+    ).fillna("")
+
+    ent.columns = ent.columns.str.lower().str.strip()
+
+    # Ensure all expected columns exist
+    for col in cols_needed:
+        if col not in ent.columns:
+            ent[col] = ""
+
+    # Apply TRANID_ALIASES normalisation (same logic as load_data)
+    aliases = cfg.get("TRANID_ALIASES", {})
+    if aliases:
+        import re
+        def _canonicalize(val):
+            for pattern, replacement in aliases.items():
+                if re.fullmatch(pattern, val):
+                    return re.sub(pattern, replacement, val)
+            return val
+        original      = ent["tranid"].copy()
+        ent["tranid"] = ent["tranid"].apply(_canonicalize)
+        changed       = (ent["tranid"] != original).sum()
+        if changed:
+            canonical_mask    = ent["tranid"] == original
+            canonical_descrtx = (
+                ent[canonical_mask][["tranid", "descrtx"]]
+                .drop_duplicates("tranid")
+                .set_index("tranid")["descrtx"]
+                .to_dict()
+            )
+            aliased_mask = ~canonical_mask
+            ent.loc[aliased_mask, "descrtx"] = (
+                ent.loc[aliased_mask, "tranid"]
+                .map(canonical_descrtx)
+                .fillna(ent.loc[aliased_mask, "descrtx"])
+            )
+            log.info("TRANID_ALIASES: normalised %d rows", changed)
+
+    # Cast to Categorical — dramatically reduces memory for repeated strings
+    for col in cols_needed:
+        ent[col] = ent[col].astype("category")
+
+    log.info("Lean load: %d rows  |  %.1f MB peak estimate",
+             len(ent), ent.memory_usage(deep=True).sum() / 1e6)
+    return ent
+
+
 def main():
     parser = argparse.ArgumentParser(description="IGA Role Miner")
     parser.add_argument("--ents",   default=CONFIG["CSV_ENTITLEMENTS"],
@@ -1173,7 +1289,7 @@ def main():
         cfg["SAMPLE_SIZE"]  = args.sample
 
     if args.top_tranids is not None:
-        df = load_data(cfg)
+        df = load_entitlements_lean(cfg)
         n  = args.top_tranids if args.top_tranids > 0 else 50
         result = top_tranid_by_population(df, n=n)
         out = Path(cfg["OUTPUT_DIR"])
