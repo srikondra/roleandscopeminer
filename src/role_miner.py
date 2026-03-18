@@ -963,10 +963,10 @@ def save_outputs(louvain_profiles:       pd.DataFrame,
                  nmf_entitlements:        pd.DataFrame,
                  nmf_scope_profiles:      pd.DataFrame,
                  nmf_scope_members:       pd.DataFrame,
-                 top_tranids:             pd.DataFrame,
                  louvain_assignments:     pd.Series,
                  nmf_assignments:         pd.Series,
                  hierarchy_rows:          list,
+                 top_tranids:             pd.DataFrame,
                  cfg: dict):
     out = Path(cfg["OUTPUT_DIR"])
     out.mkdir(parents=True, exist_ok=True)
@@ -1118,8 +1118,7 @@ def run_pipeline(cfg: dict = None) -> dict:
         nmf_profiles,          nmf_entitlements,
         nmf_scope_profiles,    nmf_scope_members,
         louvain_assignments,   nmf_assignments,
-        hier["hierarchy_rows"],
-        top_tranids,
+        hier["hierarchy_rows"], top_tranids,
         cfg,
     )
 
