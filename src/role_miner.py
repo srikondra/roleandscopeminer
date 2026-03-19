@@ -144,6 +144,17 @@ CONFIG = {
     "HIER_TECH_BASELINE_MIN_PREVALENCE":  0.50,
     "HIER_TECH_BASELINE_MAX_PREVALENCE":  0.80,
 
+    # ── Business Role Sub-hierarchy (Pass 3) ──────────────────────────────
+    # Minimum drop in prevalence between two consecutive grants (sorted desc)
+    # that triggers a new sub-tier boundary within a business role cluster.
+    # Example: 0.20 means a 20-point drop opens a new child tier.
+    "HIER_BUSINESS_GAP_THRESHOLD":   0.20,
+    # Grants below this prevalence floor are excluded from the hierarchy output.
+    "HIER_BUSINESS_MIN_PREVALENCE":  0.10,
+    # A sub-tier must contain at least this many grants; otherwise it is merged
+    # into the previous tier (prevents single-grant micro-tiers).
+    "HIER_BUSINESS_MIN_TIER_GRANTS": 2,
+
     # ── Entitlement normalization (tranid aliasing) ───────────────────────────
     # Maps regex patterns (matched against tranid) → canonical tranid value.
     # Use th^is when the same logical access is split across multiple AD groups
@@ -529,31 +540,38 @@ def discover_hierarchy_grants(df: pd.DataFrame,
              len(residual_grant_index), len(exclude))
 
     # ── Build hierarchy_rows for CSV output ───────────────────────────────
-    # Attach descrtx and appname from the first matching row in df
+    # Attach descrtx, appname, and global prevalence.
     grant_meta = (
         df[["grant_id", "descrtx", "appname"]]
         .drop_duplicates("grant_id")
         .set_index("grant_id")
     )
+    g_idx_map = {g: j for j, g in enumerate(grant_index)}
 
     hierarchy_rows = []
     for g in staff_grants:
+        j    = g_idx_map.get(g)
+        prev = round(float(global_prev[j]), 3) if j is not None else 0.0
         meta = grant_meta.loc[g] if g in grant_meta.index else {}
         hierarchy_rows.append({
-            "tier":      1,
-            "tier_name": "Staff",
-            "grant_id":  g,
-            "descrtx":   meta.get("descrtx", "") if isinstance(meta, dict) else meta["descrtx"],
-            "appname":   meta.get("appname", "")  if isinstance(meta, dict) else meta["appname"],
+            "tier":       1,
+            "tier_name":  "Staff",
+            "grant_id":   g,
+            "prevalence": prev,
+            "descrtx":    meta.get("descrtx", "") if isinstance(meta, dict) else meta["descrtx"],
+            "appname":    meta.get("appname",  "") if isinstance(meta, dict) else meta["appname"],
         })
     for g in tech_baseline_grants:
+        j    = g_idx_map.get(g)
+        prev = round(float(global_prev[j]), 3) if j is not None else 0.0
         meta = grant_meta.loc[g] if g in grant_meta.index else {}
         hierarchy_rows.append({
-            "tier":      2,
-            "tier_name": "Staff with Tech Access",
-            "grant_id":  g,
-            "descrtx":   meta.get("descrtx", "") if isinstance(meta, dict) else meta["descrtx"],
-            "appname":   meta.get("appname", "")  if isinstance(meta, dict) else meta["appname"],
+            "tier":       2,
+            "tier_name":  "Staff with Tech Access",
+            "grant_id":   g,
+            "prevalence": prev,
+            "descrtx":    meta.get("descrtx", "") if isinstance(meta, dict) else meta["descrtx"],
+            "appname":    meta.get("appname",  "") if isinstance(meta, dict) else meta["appname"],
         })
 
     return {
@@ -563,6 +581,226 @@ def discover_hierarchy_grants(df: pd.DataFrame,
         "residual_grant_index":  residual_grant_index,
         "hierarchy_rows":        hierarchy_rows,
     }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PASS 3 — BUSINESS ROLE DISCOVERY WITH SUB-HIERARCHY
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _canonical_role_name(
+    cluster_id: str,
+    profile_row: dict,
+    core_grants: list,
+    grant_meta: pd.DataFrame,
+) -> str:
+    """
+    Synthesize a human-readable canonical name for a business role cluster.
+
+    Combines up to three distinguishing signals (in priority order):
+      1. Dominant org segment  (ms_descr hierarchy level)
+      2. Top job function / job description
+      3. Top application name from core grants
+
+    Falls back to "Business Role {cluster_id}" when no HR signal is present.
+    """
+    parts = []
+
+    # 1. Org segment
+    seg = (profile_row.get("dominant_segment") or "").strip()
+    if seg:
+        parts.append(seg)
+
+    # 2. Job dimension — most-specific key first
+    for key in ("top_jobfunctiondescription", "top_jobdescription",
+                "top_jobfamilydescription", "top_jobcode"):
+        raw = (profile_row.get(key) or "").strip()
+        if raw:
+            first = raw.split("|")[0].strip()   # _top_values returns "A | B | C"
+            if first:
+                parts.append(first)
+                break
+
+    # 3. Top app name from core grants — added when fewer than 2 parts found
+    if len(parts) < 2 and core_grants:
+        for g in core_grants:
+            gid = g["grant_id"]
+            if gid in grant_meta.index:
+                app = str(grant_meta.loc[gid]["appname"]).strip()
+                csi = gid.split("|")[0] if "|" in gid else gid
+                if app and app != csi:      # skip when appname fell back to csiid
+                    parts.append(app)
+                    break
+
+    if not parts:
+        return f"Business Role {cluster_id}"
+
+    # Remove consecutive duplicates (case-insensitive)
+    deduped = [parts[0]]
+    for p in parts[1:]:
+        if p.lower() != deduped[-1].lower():
+            deduped.append(p)
+
+    return " - ".join(deduped[:3])   # cap at 3 components
+
+
+def discover_business_role_hierarchy(
+    assignments: pd.Series,
+    profiles_df: pd.DataFrame,
+    df: pd.DataFrame,
+    cluster_matrix: csr_matrix,
+    user_index: list,
+    cluster_grant_index: list,
+    cfg: dict,
+    method_prefix: str,
+) -> pd.DataFrame:
+    """
+    Pass 3 — Business Role Discovery with Sub-hierarchy Gap Detection.
+
+    For each cluster in ``assignments``:
+
+    1. Compute per-grant prevalence among cluster members.
+    2. Generate a canonical role name (HR segment + job function + top app).
+    3. Sort grants by prevalence descending; detect *natural gaps* — consecutive
+       drops ≥ HIER_BUSINESS_GAP_THRESHOLD — to split into ordered sub-tiers:
+         Sub-tier 1  (Core)       highest-prevalence grants
+         Sub-tier 2  (Extended)   next band after first gap
+         Sub-tier 3  (Specialist) next band after second gap
+         Sub-tier N  (Level N)    subsequent bands
+       A new sub-tier opens only when the current band already contains at least
+       HIER_BUSINESS_MIN_TIER_GRANTS grants (avoids single-grant micro-tiers).
+
+    The resulting structure nests under "Staff with Tech Access" (Tier 2):
+        Tier 2 : Staff with Tech Access
+          Tier 3 : <role_name>                          ← cluster parent (sub-tier 1)
+            Tier 3.2 : <role_name> - Extended           ← sub-tier 2
+            Tier 3.3 : <role_name> - Specialist         ← sub-tier 3
+
+    Parameters
+    ----------
+    assignments         : ritsid → cluster_id  (from run_louvain / run_nmf)
+    profiles_df         : DataFrame from analyze_roles (dominant_segment, top_job*)
+    df                  : full merged frame (for grant metadata)
+    cluster_matrix      : residual sparse matrix (Tier 1 + 2 columns stripped)
+    user_index          : row-order list of ritsid
+    cluster_grant_index : column-order list of grant_id (residual only)
+    cfg                 : CONFIG dict
+    method_prefix       : "Louvain" or "NMF"
+
+    Returns
+    -------
+    pd.DataFrame  columns:
+        method, cluster_id, role_name, member_count,
+        sub_tier, sub_role_name, grant_rank,
+        grant_id, prevalence, descrtx, appname
+    """
+    gap_thresh = cfg.get("HIER_BUSINESS_GAP_THRESHOLD",   0.20)
+    min_prev   = cfg.get("HIER_BUSINESS_MIN_PREVALENCE",  0.10)
+    min_grants = cfg.get("HIER_BUSINESS_MIN_TIER_GRANTS", 2)
+    min_size   = cfg["MIN_CLUSTER_SIZE"]
+
+    u_idx = {u: i for i, u in enumerate(user_index)}
+    grant_meta = (
+        df[["grant_id", "descrtx", "appname"]]
+        .drop_duplicates("grant_id")
+        .set_index("grant_id")
+    )
+
+    # Profile lookup for naming: cluster_id → dict of profile columns
+    profile_lookup: dict = {}
+    if profiles_df is not None and not profiles_df.empty:
+        for rec in profiles_df.to_dict("records"):
+            profile_lookup[rec["cluster_id"]] = rec
+
+    _SUB_LABELS = {1: "Core", 2: "Extended", 3: "Specialist"}
+
+    rows = []
+    n_roles_done = 0
+
+    for cid, members_series in assignments.groupby(assignments):
+        members = members_series.index.tolist()
+        if len(members) < min_size:
+            continue
+
+        member_rows = [u_idx[m] for m in members if m in u_idx]
+        if not member_rows:
+            continue
+
+        # Per-grant prevalence within this cluster
+        sub          = cluster_matrix[member_rows, :]
+        grant_counts = np.asarray(sub.sum(axis=0)).flatten()
+        prevalence   = grant_counts / len(member_rows)
+
+        # Keep only grants above the floor
+        keep = np.where(prevalence >= min_prev)[0]
+        if len(keep) == 0:
+            continue
+
+        # Sort descending by prevalence
+        order       = keep[np.argsort(-prevalence[keep])]
+        sorted_prev = prevalence[order]
+
+        # Core grants (≥50%) passed to the name generator
+        core_grants = [
+            {"grant_id": cluster_grant_index[j], "prevalence": float(prevalence[j])}
+            for j in np.where(prevalence >= 0.50)[0]
+        ]
+
+        profile_row = profile_lookup.get(cid, {"cluster_id": cid})
+        role_name   = _canonical_role_name(cid, profile_row, core_grants, grant_meta)
+
+        # ── Sub-tier assignment via gap detection ─────────────────────────
+        sub_tier       = 1
+        grants_in_tier = 0
+
+        for rank, j in enumerate(order):
+            gid      = cluster_grant_index[j]
+            prev_val = float(sorted_prev[rank])
+
+            # Open a new sub-tier when the drop from the previous grant meets
+            # the threshold AND the current tier already has enough grants.
+            if rank > 0:
+                gap = float(sorted_prev[rank - 1]) - prev_val
+                if gap >= gap_thresh and grants_in_tier >= min_grants:
+                    sub_tier       += 1
+                    grants_in_tier  = 0
+
+            tier_label    = _SUB_LABELS.get(sub_tier, f"Level {sub_tier}")
+            sub_role_name = (role_name
+                             if sub_tier == 1
+                             else f"{role_name} - {tier_label}")
+
+            meta    = grant_meta.loc[gid] if gid in grant_meta.index else None
+            descrtx = str(meta["descrtx"]) if meta is not None else ""
+            appname = str(meta["appname"])  if meta is not None else ""
+
+            rows.append({
+                "method":        method_prefix,
+                "cluster_id":    cid,
+                "role_name":     role_name,
+                "member_count":  len(members),
+                "sub_tier":      sub_tier,
+                "sub_role_name": sub_role_name,
+                "grant_rank":    rank + 1,
+                "grant_id":      gid,
+                "prevalence":    round(prev_val, 3),
+                "descrtx":       descrtx,
+                "appname":       appname,
+            })
+            grants_in_tier += 1
+
+        n_roles_done += 1
+
+    result = pd.DataFrame(rows)
+    if not result.empty:
+        n_sub = int(result.groupby("cluster_id")["sub_tier"].max().sum())
+        log.info("[%s] Pass 3 Business Roles: %d roles  %d total sub-tiers  "
+                 "(gap=%.0f%%  floor=%.0f%%)",
+                 method_prefix, n_roles_done, n_sub,
+                 gap_thresh * 100, min_prev * 100)
+    else:
+        log.info("[%s] Pass 3 Business Roles: 0 roles (check MIN_CLUSTER_SIZE / data)",
+                 method_prefix)
+    return result
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1006,6 +1244,8 @@ def save_outputs(louvain_profiles:       pd.DataFrame,
                  nmf_assignments:         pd.Series,
                  hierarchy_rows:          list,
                  top_tranids:             pd.DataFrame,
+                 louvain_biz_hierarchy:   pd.DataFrame,
+                 nmf_biz_hierarchy:       pd.DataFrame,
                  cfg: dict):
     out = Path(cfg["OUTPUT_DIR"])
     out.mkdir(parents=True, exist_ok=True)
@@ -1028,6 +1268,48 @@ def save_outputs(louvain_profiles:       pd.DataFrame,
     _save(louvain_entitlements,  "louvain_role_entitlements")
     _save(nmf_profiles,          "nmf_role_profiles")
     _save(nmf_entitlements,      "nmf_role_entitlements")
+
+    # Business role hierarchy (Pass 3) — per-method detail files
+    _save(louvain_biz_hierarchy, "louvain_business_role_hierarchy")
+    _save(nmf_biz_hierarchy,     "nmf_business_role_hierarchy")
+
+    # ── Unified role hierarchy  (Tiers 1 → 2 → 3 with sub-tiers) ─────────────
+    # Columns shared across all tiers:
+    _UNIFIED = [
+        "method", "tier", "tier_name", "cluster_id", "role_name", "member_count",
+        "sub_tier", "sub_role_name", "grant_rank", "grant_id", "prevalence",
+        "descrtx", "appname",
+    ]
+    unified_frames = []
+
+    hier_df = pd.DataFrame(hierarchy_rows)
+    if not hier_df.empty:
+        hier_df = hier_df.copy()
+        hier_df["method"]        = "Global"
+        hier_df["cluster_id"]    = ""
+        hier_df["role_name"]     = hier_df["tier_name"]
+        hier_df["member_count"]  = pd.NA
+        hier_df["sub_tier"]      = pd.NA
+        hier_df["sub_role_name"] = hier_df["tier_name"]
+        hier_df["grant_rank"]    = pd.NA
+        for col in _UNIFIED:
+            if col not in hier_df.columns:
+                hier_df[col] = pd.NA
+        unified_frames.append(hier_df[_UNIFIED])
+
+    for biz_df in (louvain_biz_hierarchy, nmf_biz_hierarchy):
+        if biz_df is not None and not biz_df.empty:
+            biz = biz_df.copy()
+            biz["tier"]      = 3
+            biz["tier_name"] = "Business Role"
+            for col in _UNIFIED:
+                if col not in biz.columns:
+                    biz[col] = pd.NA
+            unified_frames.append(biz[_UNIFIED])
+
+    if unified_frames:
+        unified = pd.concat(unified_frames, ignore_index=True)
+        _save(unified, "role_hierarchy_full")
 
     # Scope outputs
     _save(louvain_scope_profiles, "louvain_scope_profiles")
@@ -1149,9 +1431,25 @@ def run_pipeline(cfg: dict = None) -> dict:
     else:
         log.info("NMF disabled (ENABLE_NMF=False) — skipping")
 
-    # 7. Scope discovery — Pass 2 (also on residual matrix)
+    # Pass 3 — Business Role Hierarchy
     log.info("─" * 40)
-    log.info("Pass 2 — Scope Discovery")
+    log.info("Pass 3 — Business Role Hierarchy Discovery")
+    log.info("─" * 40)
+    louvain_biz_hierarchy = nmf_biz_hierarchy = None
+    if louvain_assignments is not None and louvain_profiles is not None:
+        louvain_biz_hierarchy = discover_business_role_hierarchy(
+            louvain_assignments, louvain_profiles, df,
+            cluster_matrix, user_index, cluster_grant_index, cfg, "Louvain",
+        )
+    if nmf_assignments is not None and nmf_profiles is not None:
+        nmf_biz_hierarchy = discover_business_role_hierarchy(
+            nmf_assignments, nmf_profiles, df,
+            cluster_matrix, user_index, cluster_grant_index, cfg, "NMF",
+        )
+
+    # Pass 5 — Scope Discovery (HR lift within role clusters)
+    log.info("─" * 40)
+    log.info("Pass 5 — Scope Discovery (HR lift)")
     log.info("─" * 40)
     if louvain_assignments is not None:
         louvain_scope_profiles, louvain_scope_members = discover_scopes(
@@ -1162,14 +1460,15 @@ def run_pipeline(cfg: dict = None) -> dict:
             nmf_assignments, df, cluster_matrix, user_index, cluster_grant_index, cfg, "NMF"
         )
 
-    # 8. Save
+    # Save all outputs
     save_outputs(
-        louvain_profiles,      louvain_entitlements,
-        louvain_scope_profiles, louvain_scope_members,
-        nmf_profiles,          nmf_entitlements,
-        nmf_scope_profiles,    nmf_scope_members,
-        louvain_assignments,   nmf_assignments,
+        louvain_profiles,       louvain_entitlements,
+        louvain_scope_profiles,  louvain_scope_members,
+        nmf_profiles,           nmf_entitlements,
+        nmf_scope_profiles,     nmf_scope_members,
+        louvain_assignments,    nmf_assignments,
         hier["hierarchy_rows"], top_tranids,
+        louvain_biz_hierarchy,  nmf_biz_hierarchy,
         cfg,
     )
 
@@ -1184,6 +1483,8 @@ def run_pipeline(cfg: dict = None) -> dict:
         "nmf_profiles":            nmf_profiles,
         "louvain_entitlements":    louvain_entitlements,
         "nmf_entitlements":        nmf_entitlements,
+        "louvain_biz_hierarchy":   louvain_biz_hierarchy,
+        "nmf_biz_hierarchy":       nmf_biz_hierarchy,
         "louvain_scope_profiles":  louvain_scope_profiles,
         "louvain_scope_members":   louvain_scope_members,
         "nmf_scope_profiles":      nmf_scope_profiles,
