@@ -206,14 +206,11 @@ def load_data(cfg: dict) -> pd.DataFrame:
     # ── Normalise split AD groups → canonical tranid ─────────────────────────
     aliases = cfg.get("TRANID_ALIASES", {})
     if aliases:
-        import re
-        def _canonicalize(val):
-            for pattern, replacement in aliases.items():
-                if re.fullmatch(pattern, val):
-                    return re.sub(pattern, replacement, val)
-            return val
         original = ent["tranid"].copy()
-        ent["tranid"] = ent["tranid"].apply(_canonicalize)
+        for pattern, replacement in aliases.items():
+            ent["tranid"] = ent["tranid"].str.replace(
+                pattern, replacement, regex=True
+            )
         changed = (ent["tranid"] != original).sum()
         if changed:
             log.info("TRANID_ALIASES: normalised %d tranid values to canonical form", changed)
@@ -1227,22 +1224,19 @@ def load_entitlements_lean(cfg: dict) -> pd.DataFrame:
         if col not in ent.columns:
             ent[col] = ""
 
-    # Apply TRANID_ALIASES normalisation (same logic as load_data)
+    # Apply TRANID_ALIASES normalisation — vectorized str.replace per pattern
     aliases = cfg.get("TRANID_ALIASES", {})
     if aliases:
-        import re
-        def _canonicalize(val):
-            for pattern, replacement in aliases.items():
-                if re.fullmatch(pattern, val):
-                    return re.sub(pattern, replacement, val)
-            return val
-        original      = ent["tranid"].copy()
-        ent["tranid"] = ent["tranid"].apply(_canonicalize)
-        changed       = (ent["tranid"] != original).sum()
+        original = ent["tranid"].copy()
+        for pattern, replacement in aliases.items():
+            ent["tranid"] = ent["tranid"].str.replace(
+                pattern, replacement, regex=True
+            )
+        changed = (ent["tranid"] != original).sum()
         if changed:
             canonical_mask    = ent["tranid"] == original
             canonical_descrtx = (
-                ent[canonical_mask][["tranid", "descrtx"]]
+                ent.loc[canonical_mask, ["tranid", "descrtx"]]
                 .drop_duplicates("tranid")
                 .set_index("tranid")["descrtx"]
                 .to_dict()
