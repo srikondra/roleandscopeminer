@@ -171,7 +171,24 @@ CONFIG = {
     #            NAM\O365-E3-License-3  … and normalises all to the base name.
     "TRANID_ALIASES": {
         r"^NAM\\O365-E3-License(-\d+)?$": r"NAM\O365-E3-License",
+
+        # Email-config variants: IUO (internal-only), INBOUND (receive-only),
+        # INBOUNDSMALL (smaller inbox), INBOUNDOUTBOUND (send+receive) are all
+        # the same logical "email access" and should be treated as one grant.
+        # Normalising them raises their combined population so the merged grant
+        # qualifies for Tier 2 (Staff with Tech Access).
+        # Uncomment and adjust the tranid values to match your data:
+        # r"^(IUO|INBOUND|INBOUNDSMALL|INBOUNDOUTBOUND)$": r"INBOUNDOUTBOUND",
     },
+
+    # ── Top-tranid analysis ───────────────────────────────────────────────────
+    # When True, top_tranid_by_population groups by (tranid, descrtx, entitlecd)
+    # only — ignoring csiid.  This collapses the same logical access provisioned
+    # from multiple application instances (different csiids) into a single row.
+    # The output adds csiid_count and csiids columns to show which apps merged.
+    # Does NOT affect the full pipeline — clustering/hierarchy still use the
+    # full grant key including csiid.
+    "TOP_TRANID_IGNORE_CSIID": True,
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -322,89 +339,132 @@ def build_user_entitlement_matrix(df: pd.DataFrame):
 # 3. TOP TRANID BY POPULATION
 # ──────────────────────────────────────────────────────────────────────────────
 
-def top_tranid_by_population(df: pd.DataFrame, n: int = 50) -> pd.DataFrame:
+def top_tranid_by_population(df: pd.DataFrame, n: int = 50,
+                              ignore_csiid: bool = True) -> pd.DataFrame:
     """
-    Return the top-n grants ranked by how many distinct employees (ritsid)
-    hold them, using the full grant key as the grouping unit.
+    Return the top-n grants ranked by distinct-employee coverage.
+
+    ignore_csiid=True  (default)
+        Groups by (tranid, descrtx, entitlecd) only — csiid is ignored.
+        The same access from multiple app instances collapses into one row.
+        Extra output columns: csiid_count, csiids (pipe-separated list).
+
+    ignore_csiid=False
+        Groups by the full grant key (csiid|tranid|descrtx|entitlecd).
+        Same logical access provisioned from different apps appears as
+        separate rows.
 
     Grant key rule (mirrors load_data):
-        adguid IS NULL     →  (csiid, tranid, descrtx, entitlecd)
-        adguid IS NOT NULL →  (csiid, tranid, descrtx)
-
-    Columns returned
-    ----------------
-    grant_id        : full grant key string
-    csiid           : application identifier
-    tranid          : the (possibly normalised) tranid value
-    descrtx         : entitlement description
-    entitlecd       : entitlement code (blank when adguid is present)
-    user_count      : distinct ritsid values holding this grant
-    population_pct  : user_count / total_distinct_ritsid  (0–100)
-    adguid_null_pct : % of holders where adguid = ""
+        adguid IS NULL     →  includes entitlecd in key
+        adguid IS NOT NULL →  entitlecd is blank / excluded from key
     """
-    # Ensure string comparison works regardless of categorical dtype
-    adguid = df["adguid"].astype(str)
+    adguid  = df["adguid"].astype(str)
     no_guid = adguid.eq("")
 
-    # ── Compute grant_id using the grant key rule ─────────────────────────
     df = df.copy()
-    df["grant_id"] = np.where(
-        no_guid,
-        df["csiid"].astype(str) + "|" + df["tranid"].astype(str) + "|" +
-        df["descrtx"].astype(str) + "|" + df["entitlecd"].astype(str),
-        df["csiid"].astype(str) + "|" + df["tranid"].astype(str) + "|" +
-        df["descrtx"].astype(str),
-    )
     df["entitlecd_eff"] = np.where(no_guid, df["entitlecd"].astype(str), "")
-
     total_users = df["ritsid"].nunique()
 
-    # ── Per-grant population stats ────────────────────────────────────────
-    base = df[["ritsid", "grant_id", "adguid"]].drop_duplicates(
-        subset=["ritsid", "grant_id"]
-    )
+    if ignore_csiid:
+        # ── csiid-agnostic grouping ───────────────────────────────────────
+        # grant_id = tranid|descrtx|entitlecd_eff  (no csiid prefix)
+        df["grant_id"] = (
+            df["tranid"].astype(str) + "|" +
+            df["descrtx"].astype(str) + "|" +
+            df["entitlecd_eff"].astype(str)
+        )
 
-    user_counts = (
-        base.groupby("grant_id")["ritsid"]
-        .nunique()
-        .rename("user_count")
-    )
+        base = df[["ritsid", "grant_id", "csiid", "adguid"]].drop_duplicates(
+            subset=["ritsid", "grant_id"]
+        )
 
-    adguid_null = (
-        base.groupby("grant_id")["adguid"]
-        .apply(lambda s: round(100.0 * s.astype(str).eq("").sum() / len(s), 1))
-        .rename("adguid_null_pct")
-    )
+        user_counts  = base.groupby("grant_id")["ritsid"].nunique().rename("user_count")
+        csiid_counts = base.groupby("grant_id")["csiid"].nunique().rename("csiid_count")
+        csiid_list   = (
+            base.groupby("grant_id")["csiid"]
+            .apply(lambda s: " | ".join(sorted(s.astype(str).unique())))
+            .rename("csiids")
+        )
+        adguid_null  = (
+            base.groupby("grant_id")["adguid"]
+            .apply(lambda s: round(100.0 * s.astype(str).eq("").sum() / len(s), 1))
+            .rename("adguid_null_pct")
+        )
 
-    stats = (
-        pd.concat([user_counts, adguid_null], axis=1)
-        .reset_index()
-        .sort_values("user_count", ascending=False)
-        .head(n)
-        .assign(population_pct=lambda d: (d["user_count"] / total_users * 100).round(1))
-    )
+        stats = (
+            pd.concat([user_counts, csiid_counts, csiid_list, adguid_null], axis=1)
+            .reset_index()
+            .sort_values("user_count", ascending=False)
+            .head(n)
+            .assign(population_pct=lambda d: (d["user_count"] / total_users * 100).round(1))
+        )
 
-    top_grant_set = set(stats["grant_id"])
+        top_grant_set = set(stats["grant_id"])
+        meta = (
+            df.loc[df["grant_id"].isin(top_grant_set),
+                   ["grant_id", "tranid", "descrtx", "entitlecd_eff"]]
+            .drop_duplicates("grant_id")
+            .rename(columns={"entitlecd_eff": "entitlecd"})
+        )
 
-    # ── Attach component columns from the first matching raw row ──────────
-    meta_cols = ["grant_id", "csiid", "tranid", "descrtx", "entitlecd_eff"]
-    meta = (
-        df.loc[df["grant_id"].isin(top_grant_set), meta_cols]
-        .drop_duplicates("grant_id")
-        .rename(columns={"entitlecd_eff": "entitlecd"})
-    )
+        result = (
+            stats
+            .merge(meta, on="grant_id", how="left")
+            .sort_values("user_count", ascending=False)
+            [["grant_id", "tranid", "descrtx", "entitlecd",
+              "user_count", "population_pct", "csiid_count", "csiids",
+              "adguid_null_pct"]]
+            .reset_index(drop=True)
+        )
 
-    result = (
-        stats
-        .merge(meta, on="grant_id", how="left")
-        .sort_values("user_count", ascending=False)
-        [["grant_id", "csiid", "tranid", "descrtx", "entitlecd",
-          "user_count", "population_pct", "adguid_null_pct"]]
-        .reset_index(drop=True)
-    )
+    else:
+        # ── Full grant key (csiid-aware) ──────────────────────────────────
+        df["grant_id"] = np.where(
+            no_guid,
+            df["csiid"].astype(str) + "|" + df["tranid"].astype(str) + "|" +
+            df["descrtx"].astype(str) + "|" + df["entitlecd"].astype(str),
+            df["csiid"].astype(str) + "|" + df["tranid"].astype(str) + "|" +
+            df["descrtx"].astype(str),
+        )
 
-    log.info("Top-%d grants: highest coverage %.1f%%  lowest %.1f%%",
-             n,
+        base = df[["ritsid", "grant_id", "adguid"]].drop_duplicates(
+            subset=["ritsid", "grant_id"]
+        )
+
+        user_counts = base.groupby("grant_id")["ritsid"].nunique().rename("user_count")
+        adguid_null = (
+            base.groupby("grant_id")["adguid"]
+            .apply(lambda s: round(100.0 * s.astype(str).eq("").sum() / len(s), 1))
+            .rename("adguid_null_pct")
+        )
+
+        stats = (
+            pd.concat([user_counts, adguid_null], axis=1)
+            .reset_index()
+            .sort_values("user_count", ascending=False)
+            .head(n)
+            .assign(population_pct=lambda d: (d["user_count"] / total_users * 100).round(1))
+        )
+
+        top_grant_set = set(stats["grant_id"])
+        meta = (
+            df.loc[df["grant_id"].isin(top_grant_set),
+                   ["grant_id", "csiid", "tranid", "descrtx", "entitlecd_eff"]]
+            .drop_duplicates("grant_id")
+            .rename(columns={"entitlecd_eff": "entitlecd"})
+        )
+
+        result = (
+            stats
+            .merge(meta, on="grant_id", how="left")
+            .sort_values("user_count", ascending=False)
+            [["grant_id", "csiid", "tranid", "descrtx", "entitlecd",
+              "user_count", "population_pct", "adguid_null_pct"]]
+            .reset_index(drop=True)
+        )
+
+    log.info("Top-%d grants (ignore_csiid=%s): highest %.1f%%  lowest %.1f%%",
+             n, ignore_csiid,
              stats["population_pct"].iloc[0],
              stats["population_pct"].iloc[-1])
     return result
@@ -1394,7 +1454,9 @@ def run_pipeline(cfg: dict = None) -> dict:
     matrix, user_index, grant_index = build_user_entitlement_matrix(df)
 
     # 3. Top tranid by population
-    top_tranids = top_tranid_by_population(df)
+    top_tranids = top_tranid_by_population(
+        df, ignore_csiid=cfg.get("TOP_TRANID_IGNORE_CSIID", True)
+    )
 
     # 4. Org graph
     org_graph = build_org_graph(df)
@@ -1586,7 +1648,9 @@ def main():
     if args.top_tranids is not None:
         df = load_entitlements_lean(cfg)
         n  = args.top_tranids if args.top_tranids > 0 else 50
-        result = top_tranid_by_population(df, n=n)
+        result = top_tranid_by_population(
+            df, n=n, ignore_csiid=cfg.get("TOP_TRANID_IGNORE_CSIID", True)
+        )
         out = Path(cfg["OUTPUT_DIR"])
         out.mkdir(parents=True, exist_ok=True)
         ts  = datetime.now().strftime("%Y%m%d_%H%M%S")
