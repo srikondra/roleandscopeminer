@@ -1752,6 +1752,8 @@ def main():
                         help="Limit to N employees (for testing)")
     parser.add_argument("--top-tranids", type=int, default=None, metavar="N",
                         help="Run only the top-N tranid report and exit (default 50)")
+    parser.add_argument("--tier-defs", default=None,
+                        help="Path to tier_definitions CSV (columns: tier, tranid[, notes])")
     args = parser.parse_args()
 
     cfg = CONFIG.copy()
@@ -1761,6 +1763,8 @@ def main():
     cfg["OUTPUT_DIR"]       = args.out
     if args.sample:
         cfg["SAMPLE_SIZE"]  = args.sample
+    if args.tier_defs:
+        cfg["TIER_DEFINITIONS_FILE"] = args.tier_defs
 
     if args.top_tranids is not None:
         df = load_entitlements_lean(cfg)
