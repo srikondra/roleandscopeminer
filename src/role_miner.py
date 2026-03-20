@@ -155,6 +155,22 @@ CONFIG = {
     # into the previous tier (prevents single-grant micro-tiers).
     "HIER_BUSINESS_MIN_TIER_GRANTS": 2,
 
+    # ── Pre-defined tier grants (optional) ────────────────────────────────────
+    # Path to a CSV with columns: tier, tranid[, notes]
+    # When provided, Tier 1 and Tier 2 grants are identified by tranid match
+    # instead of being discovered dynamically by prevalence thresholds.
+    # Produce this file by reviewing top_tranids.csv output and labelling each
+    # tranid as tier 1 (Staff) or tier 2 (Staff with Tech Access).
+    # Set to None (or omit) to use dynamic prevalence-based discovery.
+    #
+    # Example tier_definitions.csv:
+    #   tier,tranid,notes
+    #   1,O365-E3-License,All-staff base license
+    #   1,AzureAD-User,
+    #   2,VPN-Access,Tech access gate
+    #   2,INBOUNDOUTBOUND,Email (normalised via TRANID_ALIASES)
+    "TIER_DEFINITIONS_FILE": None,
+
     # ── Entitlement normalization (tranid aliasing) ───────────────────────────
     # Maps regex patterns (matched against tranid) → canonical tranid value.
     # Use th^is when the same logical access is split across multiple AD groups
@@ -231,7 +247,22 @@ def load_data(cfg: dict) -> pd.DataFrame:
     _require_cols(emp, ["ritsid", "empid", "dept_mgr_geid"],
                   source="employees CSV")
 
+    # ── Capture original grant_id before alias normalization ─────────────────
+    # Preserved so that hierarchy output can reference real source grants
+    # rather than the synthetic normalized tranid produced by TRANID_ALIASES.
+    _no_guid_pre = ent["adguid"].eq("")
+    ent["grant_id_orig"] = np.where(
+        _no_guid_pre,
+        ent["csiid"] + "|" + ent["tranid"] + "|" + ent["descrtx"] + "|" + ent["entitlecd"],
+        ent["csiid"] + "|" + ent["tranid"] + "|" + ent["descrtx"],
+    )
+
     # ── Normalise split AD groups → canonical tranid ─────────────────────────
+    # tranid_aliased tracks rows whose tranid was changed by an alias rule.
+    # These rows will have csiid excluded from their grant_id (see below) so
+    # that the same logical access provisioned from different app instances
+    # (different csiids) collapses into a single grant for role mining.
+    ent["tranid_aliased"] = False
     aliases = cfg.get("TRANID_ALIASES", {})
     if aliases:
         original = ent["tranid"].copy()
@@ -242,16 +273,16 @@ def load_data(cfg: dict) -> pd.DataFrame:
         changed = (ent["tranid"] != original).sum()
         if changed:
             log.info("TRANID_ALIASES: normalised %d tranid values to canonical form", changed)
+            aliased_mask = ent["tranid"] != original
+            ent["tranid_aliased"] = aliased_mask
             # Pick up descrtx from the canonical (un-aliased) records so all
             # aliased rows share the same descrtx as the base record.
-            canonical_mask = ent["tranid"] == original
             canonical_descrtx = (
-                ent[canonical_mask][["tranid", "descrtx"]]
+                ent[~aliased_mask][["tranid", "descrtx"]]
                 .drop_duplicates("tranid")
                 .set_index("tranid")["descrtx"]
                 .to_dict()
             )
-            aliased_mask = ~canonical_mask
             ent.loc[aliased_mask, "descrtx"] = (
                 ent.loc[aliased_mask, "tranid"]
                 .map(canonical_descrtx)
@@ -260,11 +291,15 @@ def load_data(cfg: dict) -> pd.DataFrame:
 
     # ── Apply grant key rule ──────────────────────────────────────────────────
     # adguid="" (empty string after fillna) is treated the same as NULL.
-    no_guid  = ent["adguid"].eq("")
+    # Aliased tranids (normalised by TRANID_ALIASES) drop csiid from the key
+    # so that the same logical access across different app instances collapses
+    # into one grant for role mining purposes.
+    no_guid     = ent["adguid"].eq("")
+    csiid_pfx   = np.where(ent["tranid_aliased"], "", ent["csiid"] + "|")
     ent["grant_id"] = np.where(
         no_guid,
-        ent["csiid"] + "|" + ent["tranid"] + "|" + ent["descrtx"] + "|" + ent["entitlecd"],
-        ent["csiid"] + "|" + ent["tranid"] + "|" + ent["descrtx"],
+        csiid_pfx + ent["tranid"] + "|" + ent["descrtx"] + "|" + ent["entitlecd"],
+        csiid_pfx + ent["tranid"] + "|" + ent["descrtx"],
     )
     # entitlecd_eff: populated only when it contributed to the key
     ent["entitlecd_eff"] = np.where(no_guid, ent["entitlecd"], "")
@@ -518,6 +553,71 @@ def build_org_graph(df: pd.DataFrame) -> nx.DiGraph:
 # 4. ROLE HIERARCHY  (Staff root → Tech Baseline → Business roles)
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _load_tier_definitions(cfg: dict,
+                            df: pd.DataFrame,
+                            grant_index: list) -> tuple | None:
+    """
+    Load pre-defined Tier 1 / Tier 2 grant sets from TIER_DEFINITIONS_FILE.
+
+    The file must be a CSV with at minimum two columns:
+        tier   — integer (1 or 2)
+        tranid — canonical tranid value (after TRANID_ALIASES have been applied)
+
+    Matching is tranid-level: every grant_id whose tranid appears in the file
+    is assigned to the corresponding tier.  Grants listed under both tiers are
+    assigned to Tier 1 (Staff takes precedence).
+
+    Returns
+    -------
+    (tier1_grant_ids, tier2_grant_ids) — a pair of sets, or None if the file
+    is not configured / not found (caller falls back to dynamic discovery).
+    """
+    path_str = cfg.get("TIER_DEFINITIONS_FILE")
+    if not path_str:
+        return None
+    path = Path(path_str)
+    if not path.exists():
+        log.warning("TIER_DEFINITIONS_FILE '%s' not found — falling back to dynamic discovery", path)
+        return None
+
+    tier_df = pd.read_csv(path, dtype=str).fillna("")
+    tier_df.columns = tier_df.columns.str.lower().str.strip()
+    missing = {"tier", "tranid"} - set(tier_df.columns)
+    if missing:
+        raise ValueError(f"tier_definitions CSV is missing columns: {missing}")
+
+    tier1_tranids = set(tier_df[tier_df["tier"].str.strip() == "1"]["tranid"].str.strip())
+    tier2_tranids = set(tier_df[tier_df["tier"].str.strip() == "2"]["tranid"].str.strip())
+
+    # Build grant_id → tranid lookup from df (TRANID_ALIASES already applied at load time)
+    grant_tranid = (
+        df[["grant_id", "tranid"]]
+        .drop_duplicates("grant_id")
+        .set_index("grant_id")["tranid"]
+        .to_dict()
+    )
+
+    tier1_grants = {gid for gid in grant_index if grant_tranid.get(gid) in tier1_tranids}
+    tier2_grants = {gid for gid in grant_index
+                    if grant_tranid.get(gid) in tier2_tranids and gid not in tier1_grants}
+
+    log.info(
+        "Tier definitions loaded from '%s': "
+        "%d Tier-1 tranids → %d grants | %d Tier-2 tranids → %d grants",
+        path, len(tier1_tranids), len(tier1_grants), len(tier2_tranids), len(tier2_grants),
+    )
+
+    # Warn about tranids that matched nothing in the data
+    unmatched1 = tier1_tranids - {grant_tranid.get(g) for g in tier1_grants}
+    unmatched2 = tier2_tranids - {grant_tranid.get(g) for g in tier2_grants}
+    if unmatched1:
+        log.warning("Tier-1 tranids with no matching grants: %s", ", ".join(sorted(unmatched1)))
+    if unmatched2:
+        log.warning("Tier-2 tranids with no matching grants: %s", ", ".join(sorted(unmatched2)))
+
+    return tier1_grants, tier2_grants
+
+
 def discover_hierarchy_grants(df: pd.DataFrame,
                                matrix: csr_matrix,
                                user_index: list,
@@ -557,39 +657,47 @@ def discover_hierarchy_grants(df: pd.DataFrame,
     u_idx   = {u: i for i, u in enumerate(user_index)}
     n_users = len(user_index)
 
-    # ── Tier 1: Staff root grants ─────────────────────────────────────────
-    no_adguid_users = set(df[df["adguid"].eq("")]["ritsid"].unique())
-    no_adguid_rows  = [u_idx[u] for u in no_adguid_users if u in u_idx]
-
+    # Global prevalence — needed for hierarchy_rows regardless of discovery mode
     global_counts = np.asarray(matrix.sum(axis=0)).flatten()
     global_prev   = global_counts / n_users
 
-    no_adguid_counts = (
-        np.asarray(matrix[no_adguid_rows, :].sum(axis=0)).flatten()
-        if no_adguid_rows else np.zeros(len(grant_index))
-    )
+    # ── Tier identification: pre-defined file OR dynamic discovery ────────────
+    predefined = _load_tier_definitions(cfg, df, grant_index)
+    if predefined is not None:
+        staff_grants, tech_baseline_grants = predefined
+        log.info("Hierarchy — Tier 1 Staff root grants    : %d  (pre-defined)", len(staff_grants))
+        log.info("Hierarchy — Tier 2 Tech Baseline grants : %d  (pre-defined)", len(tech_baseline_grants))
+    else:
+        # ── Tier 1: Staff root grants (dynamic) ───────────────────────────────
+        no_adguid_users = set(df[df["adguid"].eq("")]["ritsid"].unique())
+        no_adguid_rows  = [u_idx[u] for u in no_adguid_users if u in u_idx]
 
-    staff_mask   = (no_adguid_counts > 0) & (global_prev >= staff_min_prev)
-    staff_grants = {grant_index[j] for j in np.where(staff_mask)[0]}
-    log.info("Hierarchy — Tier 1 Staff root grants    : %d  (global prev ≥ %.0f%%)",
-             len(staff_grants), staff_min_prev * 100)
+        no_adguid_counts = (
+            np.asarray(matrix[no_adguid_rows, :].sum(axis=0)).flatten()
+            if no_adguid_rows else np.zeros(len(grant_index))
+        )
 
-    # ── Tier 2: Tech Baseline grants ──────────────────────────────────────
-    tech_users = set(df[df["adguid"].ne("")]["ritsid"].unique())
-    tech_rows  = [u_idx[u] for u in tech_users if u in u_idx]
-    n_tech     = len(tech_rows)
+        staff_mask   = (no_adguid_counts > 0) & (global_prev >= staff_min_prev)
+        staff_grants = {grant_index[j] for j in np.where(staff_mask)[0]}
+        log.info("Hierarchy — Tier 1 Staff root grants    : %d  (global prev ≥ %.0f%%)",
+                 len(staff_grants), staff_min_prev * 100)
 
-    tech_prev = (
-        np.asarray(matrix[tech_rows, :].sum(axis=0)).flatten() / n_tech
-        if tech_rows else np.zeros(len(grant_index))
-    )
+        # ── Tier 2: Tech Baseline grants (dynamic) ────────────────────────────
+        tech_users = set(df[df["adguid"].ne("")]["ritsid"].unique())
+        tech_rows  = [u_idx[u] for u in tech_users if u in u_idx]
+        n_tech     = len(tech_rows)
 
-    tech_mask            = (~staff_mask
-                            & (tech_prev >= tech_min_prev)
-                            & (tech_prev <= tech_max_prev))
-    tech_baseline_grants = {grant_index[j] for j in np.where(tech_mask)[0]}
-    log.info("Hierarchy — Tier 2 Tech Baseline grants : %d  (tech prev %.0f%%–%.0f%%)",
-             len(tech_baseline_grants), tech_min_prev * 100, tech_max_prev * 100)
+        tech_prev = (
+            np.asarray(matrix[tech_rows, :].sum(axis=0)).flatten() / n_tech
+            if tech_rows else np.zeros(len(grant_index))
+        )
+
+        tech_mask            = (~staff_mask
+                                & (tech_prev >= tech_min_prev)
+                                & (tech_prev <= tech_max_prev))
+        tech_baseline_grants = {grant_index[j] for j in np.where(tech_mask)[0]}
+        log.info("Hierarchy — Tier 2 Tech Baseline grants : %d  (tech prev %.0f%%–%.0f%%)",
+                 len(tech_baseline_grants), tech_min_prev * 100, tech_max_prev * 100)
 
     # ── Residual matrix for Tier 3 clustering ────────────────────────────
     exclude              = staff_grants | tech_baseline_grants
@@ -600,7 +708,10 @@ def discover_hierarchy_grants(df: pd.DataFrame,
              len(residual_grant_index), len(exclude))
 
     # ── Build hierarchy_rows for CSV output ───────────────────────────────
-    # Attach descrtx, appname, and global prevalence.
+    # Each normalized grant is expanded to its original pre-alias variants so
+    # published roles reference real grants from the source system.
+    # e.g. NAM\O365-E3-License-2 and -3 (collapsed by TRANID_ALIASES into one
+    # matrix column) both appear as separate rows in the output.
     grant_meta = (
         df[["grant_id", "descrtx", "appname"]]
         .drop_duplicates("grant_id")
@@ -608,31 +719,37 @@ def discover_hierarchy_grants(df: pd.DataFrame,
     )
     g_idx_map = {g: j for j, g in enumerate(grant_index)}
 
+    # Normalized grant_id → list of original (pre-alias) grant_ids
+    orig_expansion: dict = {}
+    if "grant_id_orig" in df.columns:
+        for norm_gid, grp in (
+            df[["grant_id", "grant_id_orig"]]
+            .drop_duplicates()
+            .groupby("grant_id")["grant_id_orig"]
+        ):
+            orig_expansion[norm_gid] = grp.tolist()
+
     hierarchy_rows = []
-    for g in staff_grants:
-        j    = g_idx_map.get(g)
-        prev = round(float(global_prev[j]), 3) if j is not None else 0.0
-        meta = grant_meta.loc[g] if g in grant_meta.index else {}
-        hierarchy_rows.append({
-            "tier":       1,
-            "tier_name":  "Staff",
-            "grant_id":   g,
-            "prevalence": prev,
-            "descrtx":    meta.get("descrtx", "") if isinstance(meta, dict) else meta["descrtx"],
-            "appname":    meta.get("appname",  "") if isinstance(meta, dict) else meta["appname"],
-        })
-    for g in tech_baseline_grants:
-        j    = g_idx_map.get(g)
-        prev = round(float(global_prev[j]), 3) if j is not None else 0.0
-        meta = grant_meta.loc[g] if g in grant_meta.index else {}
-        hierarchy_rows.append({
-            "tier":       2,
-            "tier_name":  "Staff with Tech Access",
-            "grant_id":   g,
-            "prevalence": prev,
-            "descrtx":    meta.get("descrtx", "") if isinstance(meta, dict) else meta["descrtx"],
-            "appname":    meta.get("appname",  "") if isinstance(meta, dict) else meta["appname"],
-        })
+    for tier_num, tier_name, grant_set in (
+        (1, "Staff",                  staff_grants),
+        (2, "Staff with Tech Access", tech_baseline_grants),
+    ):
+        for g in grant_set:
+            j       = g_idx_map.get(g)
+            prev    = round(float(global_prev[j]), 3) if j is not None else 0.0
+            meta    = grant_meta.loc[g] if g in grant_meta.index else {}
+            descrtx = meta.get("descrtx", "") if isinstance(meta, dict) else meta["descrtx"]
+            appname = meta.get("appname",  "") if isinstance(meta, dict) else meta["appname"]
+            for orig_gid in orig_expansion.get(g, [g]):
+                hierarchy_rows.append({
+                    "tier":               tier_num,
+                    "tier_name":          tier_name,
+                    "grant_id":           orig_gid,
+                    "grant_id_normalized": g,
+                    "prevalence":         prev,
+                    "descrtx":            descrtx,
+                    "appname":            appname,
+                })
 
     return {
         "staff_grants":          staff_grants,
@@ -1337,8 +1454,8 @@ def save_outputs(louvain_profiles:       pd.DataFrame,
     # Columns shared across all tiers:
     _UNIFIED = [
         "method", "tier", "tier_name", "cluster_id", "role_name", "member_count",
-        "sub_tier", "sub_role_name", "grant_rank", "grant_id", "prevalence",
-        "descrtx", "appname",
+        "sub_tier", "sub_role_name", "grant_rank",
+        "grant_id", "grant_id_normalized", "prevalence", "descrtx", "appname",
     ]
     unified_frames = []
 
