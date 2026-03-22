@@ -1405,7 +1405,8 @@ def discover_scopes(assignments: pd.Series,
                     .drop_duplicates("ritsid")
                     .set_index("ritsid"))
     scope_attrs  = _scope_hr_attrs(df, cfg)
-    userid_map   = hr_lookup["empid"].to_dict() if "empid" in hr_lookup.columns else {}
+    userid_map   = hr_lookup["userid"].to_dict() if "userid" in hr_lookup.columns else {}
+    empid_map    = hr_lookup["empid"].to_dict()  if "empid"  in hr_lookup.columns else {}
 
     all_scope_profiles = []
     all_scope_members  = []
@@ -1502,6 +1503,7 @@ def discover_scopes(assignments: pd.Series,
                 all_scope_members.append({
                     "ritsid":              m,
                     "userid":              userid_map.get(m, ""),
+                    "empid":               empid_map.get(m, ""),
                     "template_cluster_id": cid,
                     "scope_id":            scope_id,
                     "scope_attribute":     attr,
@@ -1621,14 +1623,18 @@ def save_outputs(louvain_profiles:       pd.DataFrame,
 
     # User-role assignments (both methods side by side)
     userid_map: dict = {}
-    if df is not None and "empid" in df.columns:
-        userid_map = (
-            df.drop_duplicates("ritsid").set_index("ritsid")["empid"].to_dict()
-        )
+    empid_map:  dict = {}
+    if df is not None:
+        base = df.drop_duplicates("ritsid").set_index("ritsid")
+        if "userid" in base.columns:
+            userid_map = base["userid"].to_dict()
+        if "empid" in base.columns:
+            empid_map  = base["empid"].to_dict()
     base_assignments = louvain_assignments if louvain_assignments is not None else nmf_assignments
     if base_assignments is not None:
         assignments_df = pd.DataFrame({"ritsid": base_assignments.index})
         assignments_df["userid"] = assignments_df["ritsid"].map(userid_map).fillna("")
+        assignments_df["empid"]  = assignments_df["ritsid"].map(empid_map).fillna("")
         if louvain_assignments is not None:
             assignments_df["louvain_role"] = louvain_assignments.values
         if nmf_assignments is not None:
