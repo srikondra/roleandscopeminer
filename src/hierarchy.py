@@ -377,16 +377,23 @@ class BusinessRoleHierarchy:
 
         result = pd.DataFrame(rows)
         if not result.empty:
-            result = (
+            deduped = (
                 result
-                .sort_values(["cluster_id", "sub_tier", "appname", "prevalence"],
-                             ascending=[True, True, True, False])
-                .reset_index(drop=True)
+                .sort_values(["cluster_id", "sub_tier"], ascending=[True, True])
+                .drop_duplicates(subset=["cluster_id", "sub_tier"])
             )
-            n_sub = int(result.groupby("cluster_id")["sub_tier"].max().sum())
-            log.info("[%s] Business roles: %d roles  %d sub-tiers  (gap=%.0f%%  floor=%.0f%%)",
-                     method_prefix, n_roles_out, n_sub,
-                     gap_thresh * 100, min_prev * 100)
+            tier_label = deduped["sub_tier"].map(
+                lambda t: _SUB_LABELS.get(t, f"Level{t}"))
+            sub_cid = deduped["cluster_id"].where(
+                deduped["sub_tier"] == 1,
+                deduped["cluster_id"] + "-" + tier_label)
+            result = pd.DataFrame({
+                "cluster_id":        sub_cid.values,
+                "parent_cluster_id": deduped["cluster_id"].where(
+                    deduped["sub_tier"] > 1, "").values,
+            })
+            log.info("[%s] Business roles: %d roles  (gap=%.0f%%  floor=%.0f%%)",
+                     method_prefix, n_roles_out, gap_thresh * 100, min_prev * 100)
         else:
             log.info("[%s] Business roles: 0 roles (check MIN_CLUSTER_SIZE / data)", method_prefix)
         return result

@@ -432,20 +432,8 @@ else:
         for algo_name, ar in result.algorithm_results.items():
             if ar.biz_hierarchy is not None and not ar.biz_hierarchy.empty:
                 st.subheader(f"{algo_name.upper()} — {ar.n_roles} roles")
-
-                # Role selector
-                roles    = sorted(ar.biz_hierarchy["role_name"].unique())
-                selected = st.selectbox(
-                    "Select role to inspect",
-                    options=["(all)"] + roles,
-                    key=f"biz_role_{algo_name}",
-                )
-                view = ar.biz_hierarchy if selected == "(all)" else \
-                       ar.biz_hierarchy[ar.biz_hierarchy["role_name"] == selected]
-
                 st.dataframe(
-                    view[["role_name", "member_count", "sub_tier", "sub_role_name",
-                           "grant_rank", "grant_id", "prevalence", "descrtx", "appname"]],
+                    ar.biz_hierarchy[["cluster_id", "parent_cluster_id"]],
                     use_container_width=True, hide_index=True,
                 )
             else:

@@ -290,7 +290,8 @@ class PipelineResult:
             h["sub_role_name"] = h["tier_name"]
             h["grant_rank"]    = pd.NA
             for c in _COLS:
-                h.setdefault(c, pd.NA)
+                if c not in h.columns:
+                    h[c] = pd.NA
             frames.append(h[_COLS])
 
         for ar in self.algorithm_results.values():
