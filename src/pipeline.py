@@ -12,7 +12,6 @@ Execution order
       a. Cluster users                 (RoleAlgorithm.fit)
       b. Profile clusters              (RoleProfiler.analyze)
       c. Build business role hierarchy (BusinessRoleHierarchy.discover)
-      d. Discover scope variants       (ScopeDiscovery.discover)
 7.  Save all outputs to OUTPUT_DIR
 
 progress_callback(step: str, pct: float) is optional — the UI wires this to
@@ -32,7 +31,7 @@ from .config import PipelineConfig, AlgorithmResult, PipelineResult
 from .data import DataLoader, build_user_entitlement_matrix, top_tranid_by_population
 from .hierarchy import TierDiscovery, BusinessRoleHierarchy
 from .algorithms.registry import AlgorithmRegistry
-from .analysis import RoleProfiler, ScopeDiscovery
+from .analysis import RoleProfiler
 
 log = logging.getLogger("role_miner.pipeline")
 
@@ -91,7 +90,6 @@ class PipelineRunner:
         n         = max(len(enabled), 1)
         profiler   = RoleProfiler(cfg)
         biz_hier   = BusinessRoleHierarchy(cfg)
-        scope_disc = ScopeDiscovery(cfg)
 
         for i, algo_name in enumerate(enabled):
             base_pct = 0.28 + (i / n) * 0.58
@@ -121,19 +119,12 @@ class PipelineRunner:
                 cluster_matrix, user_index, cluster_grant_index, algo_name
             )
 
-            _ap("Discovering scopes …", 0.80)
-            scope_profiles, scope_members = scope_disc.discover(
-                assignments, df, cluster_matrix, user_index, cluster_grant_index, algo_name
-            )
-
             result.algorithm_results[algo_name] = AlgorithmResult(
                 method=algo_name,
                 assignments=assignments,
                 profiles=profiles,
                 entitlements=entitlements,
                 biz_hierarchy=biz_df,
-                scope_profiles=scope_profiles,
-                scope_members=scope_members,
             )
 
         # ── 7. Save ────────────────────────────────────────────────────────────
@@ -168,8 +159,6 @@ class PipelineRunner:
             _save(ar.profiles,       f"{algo_name}_role_profiles")
             _save(ar.entitlements,   f"{algo_name}_role_entitlements")
             _save(ar.biz_hierarchy,  f"{algo_name}_business_role_hierarchy")
-            _save(ar.scope_profiles, f"{algo_name}_scope_profiles")
-            _save(ar.scope_members,  f"{algo_name}_scope_members")
 
         # Unified hierarchy
         unified = result.unified_hierarchy()

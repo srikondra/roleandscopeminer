@@ -62,18 +62,6 @@ class HierarchyConfig(BaseModel):
         description="Minimum grants per sub-tier (prevents single-grant micro-tiers)")
 
 
-class ScopeConfig(BaseModel):
-    """Scope discovery (Pass 2) settings."""
-    lift_threshold:  float = Field(5.0,  gt=0.0,
-        description="P(grant|attr=V) / P(grant|attr≠V) floor to flag as scoped")
-    min_prevalence:  float = Field(0.10, ge=0.0, le=1.0,
-        description="Scope candidate grants must exceed this prevalence within the cluster")
-    max_prevalence:  float = Field(0.85, ge=0.0, le=1.0,
-        description="Universal grants (above this) are excluded from scope discovery")
-    min_group_size:  int   = Field(2, gt=0,
-        description="Minimum members in a scope sub-group to be reported")
-
-
 # ── Population filter ──────────────────────────────────────────────────────────
 
 class PopulationFilter(BaseModel):
@@ -201,7 +189,6 @@ class PipelineConfig(BaseModel):
     louvain:           LouvainConfig    = Field(default_factory=LouvainConfig)
     leiden:            LeidenConfig     = Field(default_factory=LeidenConfig)
     nmf:               NMFConfig        = Field(default_factory=NMFConfig)
-    scope:             ScopeConfig      = Field(default_factory=ScopeConfig)
     population_filter: PopulationFilter = Field(default_factory=PopulationFilter)
 
     # ── Algorithm selection ───────────────────────────────────────────────────
@@ -250,20 +237,11 @@ class AlgorithmResult:
     profiles:       Optional[pd.DataFrame] = None  # role_profiles.csv
     entitlements:   Optional[pd.DataFrame] = None  # role_entitlements.csv
     biz_hierarchy:  Optional[pd.DataFrame] = None  # business_role_hierarchy.csv
-    scope_profiles: Optional[pd.DataFrame] = None
-    scope_members:  Optional[pd.DataFrame] = None
-
     @property
     def n_roles(self) -> int:
         if self.profiles is None or self.profiles.empty:
             return 0
         return len(self.profiles)
-
-    @property
-    def n_scopes(self) -> int:
-        if self.scope_profiles is None or self.scope_profiles.empty:
-            return 0
-        return len(self.scope_profiles)
 
 
 @dataclass
@@ -289,10 +267,6 @@ class PipelineResult:
     @property
     def n_roles(self) -> int:
         return sum(ar.n_roles for ar in self.algorithm_results.values())
-
-    @property
-    def n_scopes(self) -> int:
-        return sum(ar.n_scopes for ar in self.algorithm_results.values())
 
     def unified_hierarchy(self) -> Optional[pd.DataFrame]:
         """

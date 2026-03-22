@@ -19,7 +19,7 @@ import streamlit as st
 from src.algorithms.registry import AlgorithmRegistry
 from src.config import (
     HierarchyConfig, LouvainConfig, NMFConfig,
-    PipelineConfig, PipelineResult, PopulationFilter, ScopeConfig,
+    PipelineConfig, PipelineResult, PopulationFilter,
 )
 from src.data import DataLoader
 from src.pipeline import PipelineRunner
@@ -295,14 +295,6 @@ with st.sidebar:
             business_min_prevalence=floor,
         ))
 
-    # ── 5. Scope Settings ──────────────────────────────────────────────────────
-    with st.expander("🎯  Scope Settings"):
-        lift = st.slider("Lift threshold", 1.0, 20.0, 5.0, 0.5, key="scope_lift",
-                         help="P(grant|attr=V) / P(grant|attr≠V) floor")
-        s_min = st.slider("Min prevalence (scope band)",  0.01, 0.5,  0.10, 0.01, key="scope_min")
-        s_max = st.slider("Max prevalence (scope band)",  0.50, 1.0,  0.85, 0.01, key="scope_max")
-        scope_cfg = ScopeConfig(lift_threshold=lift, min_prevalence=s_min, max_prevalence=s_max)
-
     st.divider()
 
     # ── 6. Run ─────────────────────────────────────────────────────────────────
@@ -332,7 +324,6 @@ if run_btn and run_ready:
         sample_size=sample_val,
         tier_definitions_file=tier_defs_file,
         hierarchy=hier_cfg,
-        scope=scope_cfg,
         population_filter=pop_filter,
         enabled_algorithms=enabled_algos,
         louvain=algo_configs.get("louvain", LouvainConfig()),
@@ -394,19 +385,17 @@ else:
     st.markdown("## Results")
 
     # Metrics bar
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Users",         f"{result.n_users:,}")
-    m2.metric("Grants",        f"{result.n_grants:,}")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Users",          f"{result.n_users:,}")
+    m2.metric("Grants",         f"{result.n_grants:,}")
     m3.metric("Business Roles", f"{result.n_roles:,}")
-    m4.metric("Scope Variants", f"{result.n_scopes:,}")
-    m5.metric("Runtime",        f"{result.elapsed_seconds:.1f}s")
+    m4.metric("Runtime",        f"{result.elapsed_seconds:.1f}s")
 
     st.divider()
 
     tabs = st.tabs([
         "🏗️ Tier Hierarchy",
         "🏢 Business Roles",
-        "🎯 Scope Discovery",
         "👥 User Assignments",
         "📊 Top Tranids",
         "📥 Downloads",
@@ -459,17 +448,8 @@ else:
             else:
                 st.info(f"{algo_name.upper()}: no business roles discovered.")
 
-    # ── Tab 3: Scope Discovery ─────────────────────────────────────────────────
+    # ── Tab 3: User Assignments ────────────────────────────────────────────────
     with tabs[2]:
-        for algo_name, ar in result.algorithm_results.items():
-            if ar.scope_profiles is not None and not ar.scope_profiles.empty:
-                st.subheader(f"{algo_name.upper()} — {ar.n_scopes} scope variants")
-                st.dataframe(ar.scope_profiles, use_container_width=True, hide_index=True)
-            else:
-                st.info(f"{algo_name.upper()}: no scope variants discovered.")
-
-    # ── Tab 4: User Assignments ────────────────────────────────────────────────
-    with tabs[3]:
         frames = []
         for algo_name, ar in result.algorithm_results.items():
             if ar.assignments is not None:
@@ -488,8 +468,8 @@ else:
         else:
             st.info("No assignment data available.")
 
-    # ── Tab 5: Top Tranids ─────────────────────────────────────────────────────
-    with tabs[4]:
+    # ── Tab 4: Top Tranids ─────────────────────────────────────────────────────
+    with tabs[3]:
         if result.top_tranids is not None and not result.top_tranids.empty:
             st.caption(
                 "Top tranids by distinct-employee coverage.  "
@@ -499,8 +479,8 @@ else:
         else:
             st.info("No top-tranid data.")
 
-    # ── Tab 6: Downloads ────────────────────────────────────────────────────────
-    with tabs[5]:
+    # ── Tab 5: Downloads ────────────────────────────────────────────────────────
+    with tabs[4]:
         st.subheader("Download Results")
         col1, col2 = st.columns(2)
 
@@ -517,7 +497,5 @@ else:
         with col2:
             for algo_name, ar in result.algorithm_results.items():
                 st.caption(f"**{algo_name.upper()}**")
-                _download_btn(ar.profiles,       f"Role Profiles",          f"{algo_name}_profiles.csv")
-                _download_btn(ar.biz_hierarchy,  f"Business Role Hierarchy", f"{algo_name}_biz_hierarchy.csv")
-                _download_btn(ar.scope_profiles, f"Scope Variants",         f"{algo_name}_scopes.csv")
-                _download_btn(ar.scope_members,  f"Scope Members",          f"{algo_name}_scope_members.csv")
+                _download_btn(ar.profiles,      f"Role Profiles",           f"{algo_name}_profiles.csv")
+                _download_btn(ar.biz_hierarchy, f"Business Role Hierarchy", f"{algo_name}_biz_hierarchy.csv")
