@@ -4,10 +4,12 @@ IGA Role Mining Module
 Based on US 12,309,164 B1 — Kondra et al. (Citigroup Inc.)
 
 Discovers candidate enterprise roles from current entitlement data
-using two complementary approaches:
+using three complementary approaches:
   1. Graph Community Detection (Louvain) — finds natural user clusters
      by shared entitlement structure.
-  2. Non-negative Matrix Factorization (NMF) — decomposes the
+  2. Graph Community Detection (Leiden) — stricter variant of Louvain
+     that guarantees well-connected communities; faster convergence.
+  3. Non-negative Matrix Factorization (NMF) — decomposes the
      user-entitlement matrix into latent role components.
 
 Each discovered role candidate is characterized by:
@@ -54,6 +56,13 @@ try:
 except ImportError:
     sys.exit("pip install python-louvain")
 
+try:
+    import igraph as ig
+    import leidenalg
+    _LEIDEN_AVAILABLE = True
+except ImportError:
+    _LEIDEN_AVAILABLE = False
+
 # ── logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
@@ -86,6 +95,13 @@ CONFIG = {
     # batch_size × n_users × 4 bytes of RAM.  At 2 000 × 450 000 that is
     # ~3.6 GB — safe on a 38 GB machine.  Reduce if you hit memory pressure.
     "LOUVAIN_BATCH_SIZE": 2000,
+
+    # ── Leiden tuning ─────────────────────────────────────────────────────────
+    # Leiden is a stricter, faster alternative to Louvain that guarantees
+    # well-connected communities.  Requires: pip install leidenalg igraph
+    "LEIDEN_RESOLUTION": 1.0,   # higher = more, smaller clusters
+    "LEIDEN_SEED":       42,
+    "LEIDEN_BATCH_SIZE": 2000,  # batched similarity; same RAM profile as Louvain
 
     # ── NMF tuning ────────────────────────────────────────────────────────────
     # Set to None to auto-detect (uses SVD elbow method).
@@ -134,6 +150,7 @@ CONFIG = {
     # to leave enabled at any scale.
     "ENABLE_LOUVAIN": True,
     "ENABLE_NMF":     True,
+    "ENABLE_LEIDEN":  True,   # disabled automatically if leidenalg/igraph not installed
 
     # ── Role hierarchy tiers ──────────────────────────────────────────────
     # Staff (root): grants where adguid="" AND global prevalence >= threshold.
@@ -186,7 +203,7 @@ CONFIG = {
     #            NAM\O365-E3-License-2
     #            NAM\O365-E3-License-3  … and normalises all to the base name.
     "TRANID_ALIASES": {
-        r"^NAM\\O365-E3-License(-\d+)?$": r"NAM\O365-E3-License",
+        r"^NAM\\O365-E3-License(-\d+)?$": r"NAM\\O365-E3-License",
 
         # Email-config variants: IUO (internal-only), INBOUND (receive-only),
         # INBOUNDSMALL (smaller inbox), INBOUNDOUTBOUND (send+receive) are all
@@ -951,17 +968,18 @@ def discover_business_role_hierarchy(
             appname = str(meta["appname"])  if meta is not None else ""
 
             rows.append({
-                "method":        method_prefix,
-                "cluster_id":    cid,
-                "role_name":     role_name,
-                "member_count":  len(members),
-                "sub_tier":      sub_tier,
-                "sub_role_name": sub_role_name,
-                "grant_rank":    rank + 1,
-                "grant_id":      gid,
-                "prevalence":    round(prev_val, 3),
-                "descrtx":       descrtx,
-                "appname":       appname,
+                "method":           method_prefix,
+                "cluster_id":       cid,
+                "role_name":        role_name,
+                "parent_role_name": "" if sub_tier == 1 else role_name,
+                "member_count":     len(members),
+                "sub_tier":         sub_tier,
+                "sub_role_name":    sub_role_name,
+                "grant_rank":       rank + 1,
+                "grant_id":         gid,
+                "prevalence":       round(prev_val, 3),
+                "descrtx":          descrtx,
+                "appname":          appname,
             })
             grants_in_tier += 1
 
@@ -969,6 +987,12 @@ def discover_business_role_hierarchy(
 
     result = pd.DataFrame(rows)
     if not result.empty:
+        result = (
+            result
+            .sort_values(["cluster_id", "sub_tier", "appname", "prevalence"],
+                         ascending=[True, True, True, False])
+            .reset_index(drop=True)
+        )
         n_sub = int(result.groupby("cluster_id")["sub_tier"].max().sum())
         log.info("[%s] Pass 3 Business Roles: %d roles  %d total sub-tiers  "
                  "(gap=%.0f%%  floor=%.0f%%)",
@@ -1035,9 +1059,87 @@ def run_louvain(matrix: csr_matrix, user_index: list, cfg: dict) -> pd.Series:
         random_state=cfg["LOUVAIN_SEED"],
     )
     assignments = pd.Series(
-        {user_index[i]: f"L{cid}" for i, cid in partition.items()}
+        {user_index[i]: f"LouvainRole{cid + 1}" for i, cid in partition.items()}
     )
     log.info("Louvain: %d clusters", assignments.nunique())
+    return assignments
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 5b. LEIDEN ROLE MINING
+# ──────────────────────────────────────────────────────────────────────────────
+
+def run_leiden(matrix: csr_matrix, user_index: list, cfg: dict) -> pd.Series:
+    """
+    Build a weighted user-similarity graph and run Leiden community detection.
+    Returns a pd.Series: ritsid → cluster_id  (string like 'LD0', 'LD1', …)
+
+    Leiden guarantees well-connected communities and is strictly better than
+    Louvain in partition quality.  Uses the same batched cosine-similarity
+    graph construction as run_louvain() so RAM profile is identical.
+
+    Requires: pip install leidenalg igraph
+    """
+    if not _LEIDEN_AVAILABLE:
+        log.warning("Leiden skipped — leidenalg/igraph not installed. "
+                    "Run: pip install leidenalg igraph")
+        return None
+
+    log.info("Building user similarity graph for Leiden (batched) …")
+    n          = matrix.shape[0]
+    batch_size = cfg.get("LEIDEN_BATCH_SIZE", 2000)
+    k          = min(15, n - 1)
+
+    # Row-normalise for cosine similarity
+    norms = np.asarray(matrix.sum(axis=1)).flatten()
+    norms[norms == 0] = 1
+    mat_norm = matrix.multiply(1.0 / norms[:, None]).tocsr()
+
+    # Collect edges as (source, target, weight) tuples for igraph
+    edges   = []
+    weights = []
+
+    n_batches = (n + batch_size - 1) // batch_size
+    for b in range(n_batches):
+        start     = b * batch_size
+        end       = min(start + batch_size, n)
+        sim_batch = (mat_norm[start:end] @ mat_norm.T).toarray()
+
+        for local_i, i in enumerate(range(start, end)):
+            row    = sim_batch[local_i]
+            row[i] = 0.0                                # no self-loops
+            top_k  = np.argpartition(row, -k)[-k:]
+            for j in top_k:
+                if row[j] > 0 and i < j:               # undirected: store once
+                    edges.append((i, j))
+                    weights.append(float(row[j]))
+
+        del sim_batch
+
+        if (b + 1) % 50 == 0 or (b + 1) == n_batches:
+            log.info("  similarity batch %d/%d  (users %d–%d)",
+                     b + 1, n_batches, start, end - 1)
+
+    log.info("Running Leiden (resolution=%.2f, seed=%d) …",
+             cfg.get("LEIDEN_RESOLUTION", 1.0), cfg.get("LEIDEN_SEED", 42))
+
+    G = ig.Graph(n=n, edges=edges, directed=False)
+    G.es["weight"] = weights
+
+    partition = leidenalg.find_partition(
+        G,
+        leidenalg.RBConfigurationVertexPartition,
+        weights="weight",
+        resolution_parameter=cfg.get("LEIDEN_RESOLUTION", 1.0),
+        seed=cfg.get("LEIDEN_SEED", 42),
+    )
+
+    assignments = pd.Series(
+        {user_index[i]: f"LeidenRole{cid + 1}"
+         for cid, members in enumerate(partition)
+         for i in members}
+    )
+    log.info("Leiden: %d clusters discovered", assignments.nunique())
     return assignments
 
 
@@ -1077,7 +1179,7 @@ def run_nmf(matrix: csr_matrix, user_index: list, cfg: dict) -> pd.Series:
     )
     W = model.fit_transform(matrix.astype(float))   # users × roles
     assignments = pd.Series(
-        {user_index[i]: f"N{int(np.argmax(W[i]))}" for i in range(len(user_index))}
+        {user_index[i]: f"NMFRole{int(np.argmax(W[i])) + 1}" for i in range(len(user_index))}
     )
     log.info("NMF: %d roles", assignments.nunique())
     return assignments
@@ -1209,8 +1311,17 @@ def analyze_roles(assignments: pd.Series,
             profiles.append(prof)
             all_grants.extend(grants)
 
-    profiles_df    = pd.DataFrame(profiles)
+    profiles_df     = pd.DataFrame(profiles)
     entitlements_df = pd.DataFrame(all_grants)
+    if not entitlements_df.empty:
+        entitlements_df["_csiid"] = entitlements_df["grant_id"].str.split("|").str[0]
+        entitlements_df = (
+            entitlements_df
+            .sort_values(["cluster_id", "_csiid", "prevalence"],
+                         ascending=[True, True, False])
+            .drop(columns=["_csiid"])
+            .reset_index(drop=True)
+        )
     log.info("[%s] Profiled %d roles (min_size=%d)", method_prefix,
              len(profiles_df), min_size)
     return profiles_df, entitlements_df
@@ -1294,6 +1405,7 @@ def discover_scopes(assignments: pd.Series,
                     .drop_duplicates("ritsid")
                     .set_index("ritsid"))
     scope_attrs  = _scope_hr_attrs(df, cfg)
+    userid_map   = hr_lookup["empid"].to_dict() if "empid" in hr_lookup.columns else {}
 
     all_scope_profiles = []
     all_scope_members  = []
@@ -1389,6 +1501,7 @@ def discover_scopes(assignments: pd.Series,
             for m in scope_mbrs:
                 all_scope_members.append({
                     "ritsid":              m,
+                    "userid":              userid_map.get(m, ""),
                     "template_cluster_id": cid,
                     "scope_id":            scope_id,
                     "scope_attribute":     attr,
@@ -1417,13 +1530,20 @@ def save_outputs(louvain_profiles:       pd.DataFrame,
                  nmf_entitlements:        pd.DataFrame,
                  nmf_scope_profiles:      pd.DataFrame,
                  nmf_scope_members:       pd.DataFrame,
+                 leiden_profiles:         pd.DataFrame,
+                 leiden_entitlements:     pd.DataFrame,
+                 leiden_scope_profiles:   pd.DataFrame,
+                 leiden_scope_members:    pd.DataFrame,
                  louvain_assignments:     pd.Series,
                  nmf_assignments:         pd.Series,
+                 leiden_assignments:      pd.Series,
                  hierarchy_rows:          list,
                  top_tranids:             pd.DataFrame,
                  louvain_biz_hierarchy:   pd.DataFrame,
                  nmf_biz_hierarchy:       pd.DataFrame,
-                 cfg: dict):
+                 leiden_biz_hierarchy:    pd.DataFrame,
+                 cfg: dict,
+                 df: pd.DataFrame = None):
     out = Path(cfg["OUTPUT_DIR"])
     out.mkdir(parents=True, exist_ok=True)
     ts  = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1445,16 +1565,19 @@ def save_outputs(louvain_profiles:       pd.DataFrame,
     _save(louvain_entitlements,  "louvain_role_entitlements")
     _save(nmf_profiles,          "nmf_role_profiles")
     _save(nmf_entitlements,      "nmf_role_entitlements")
+    _save(leiden_profiles,      "leiden_role_profiles")
+    _save(leiden_entitlements,  "leiden_role_entitlements")
 
     # Business role hierarchy (Pass 3) — per-method detail files
     _save(louvain_biz_hierarchy, "louvain_business_role_hierarchy")
     _save(nmf_biz_hierarchy,     "nmf_business_role_hierarchy")
+    _save(leiden_biz_hierarchy, "leiden_business_role_hierarchy")
 
     # ── Unified role hierarchy  (Tiers 1 → 2 → 3 with sub-tiers) ─────────────
     # Columns shared across all tiers:
     _UNIFIED = [
-        "method", "tier", "tier_name", "cluster_id", "role_name", "member_count",
-        "sub_tier", "sub_role_name", "grant_rank",
+        "method", "tier", "tier_name", "cluster_id", "role_name", "parent_role_name",
+        "member_count", "sub_tier", "sub_role_name", "grant_rank",
         "grant_id", "grant_id_normalized", "prevalence", "descrtx", "appname",
     ]
     unified_frames = []
@@ -1474,7 +1597,7 @@ def save_outputs(louvain_profiles:       pd.DataFrame,
                 hier_df[col] = pd.NA
         unified_frames.append(hier_df[_UNIFIED])
 
-    for biz_df in (louvain_biz_hierarchy, nmf_biz_hierarchy):
+    for biz_df in (louvain_biz_hierarchy, nmf_biz_hierarchy, leiden_biz_hierarchy):
         if biz_df is not None and not biz_df.empty:
             biz = biz_df.copy()
             biz["tier"]      = 3
@@ -1493,15 +1616,25 @@ def save_outputs(louvain_profiles:       pd.DataFrame,
     _save(louvain_scope_members,  "louvain_scope_members")
     _save(nmf_scope_profiles,     "nmf_scope_profiles")
     _save(nmf_scope_members,      "nmf_scope_members")
+    _save(leiden_scope_profiles, "leiden_scope_profiles")
+    _save(leiden_scope_members,  "leiden_scope_members")
 
     # User-role assignments (both methods side by side)
+    userid_map: dict = {}
+    if df is not None and "empid" in df.columns:
+        userid_map = (
+            df.drop_duplicates("ritsid").set_index("ritsid")["empid"].to_dict()
+        )
     base_assignments = louvain_assignments if louvain_assignments is not None else nmf_assignments
     if base_assignments is not None:
         assignments_df = pd.DataFrame({"ritsid": base_assignments.index})
+        assignments_df["userid"] = assignments_df["ritsid"].map(userid_map).fillna("")
         if louvain_assignments is not None:
             assignments_df["louvain_role"] = louvain_assignments.values
         if nmf_assignments is not None:
             assignments_df["nmf_role"] = assignments_df["ritsid"].map(nmf_assignments.to_dict())
+        if leiden_assignments is not None:
+            assignments_df["leiden_role"] = assignments_df["ritsid"].map(leiden_assignments.to_dict())
 
         # Attach louvain scope to assignments where available
         if louvain_scope_members is not None and not louvain_scope_members.empty:
@@ -1515,8 +1648,9 @@ def save_outputs(louvain_profiles:       pd.DataFrame,
 
     # Summary text
     summary_path = out / f"summary_{ts}.txt"
-    n_lou_scopes = len(louvain_scope_profiles) if louvain_scope_profiles is not None else 0
-    n_nmf_scopes = len(nmf_scope_profiles)     if nmf_scope_profiles     is not None else 0
+    n_lou_scopes    = len(louvain_scope_profiles) if louvain_scope_profiles is not None else 0
+    n_nmf_scopes    = len(nmf_scope_profiles)     if nmf_scope_profiles     is not None else 0
+    n_leiden_scopes = len(leiden_scope_profiles)  if leiden_scope_profiles  is not None else 0
     lines = [
         "IGA Role Mining — Run Summary",
         f"Timestamp : {ts}",
@@ -1532,6 +1666,11 @@ def save_outputs(louvain_profiles:       pd.DataFrame,
         lines.append(f"  Avg members    : {nmf_profiles['member_count'].mean():.1f}")
         lines.append(f"  Avg core grants: {nmf_profiles['core_grant_count'].mean():.1f}")
         lines.append(f"  Scope variants : {n_nmf_scopes}")
+    lines += ["", f"Leiden roles   : {len(leiden_profiles) if leiden_profiles is not None else 'disabled'}"]
+    if leiden_profiles is not None and not leiden_profiles.empty:
+        lines.append(f"  Avg members    : {leiden_profiles['member_count'].mean():.1f}")
+        lines.append(f"  Avg core grants: {leiden_profiles['core_grant_count'].mean():.1f}")
+        lines.append(f"  Scope variants : {n_leiden_scopes}")
     summary_path.write_text("\n".join(lines))
     log.info("Summary written to %s", summary_path)
 
@@ -1599,6 +1738,18 @@ def run_pipeline(cfg: dict = None) -> dict:
     else:
         log.info("Louvain disabled (ENABLE_LOUVAIN=False) — skipping")
 
+    # 5b. Leiden — role templates (on residual matrix)
+    leiden_assignments = leiden_profiles = leiden_entitlements = None
+    leiden_scope_profiles = leiden_scope_members = None
+    if cfg.get("ENABLE_LEIDEN", True):
+        leiden_assignments = run_leiden(cluster_matrix, user_index, cfg)
+        if leiden_assignments is not None:
+            leiden_profiles, leiden_entitlements = analyze_roles(
+                leiden_assignments, df, cluster_matrix, user_index, cluster_grant_index, cfg, "Leiden"
+            )
+    else:
+        log.info("Leiden disabled (ENABLE_LEIDEN=False) — skipping")
+
     # 6. NMF — role templates (on residual matrix)
     nmf_assignments = nmf_profiles = nmf_entitlements = None
     nmf_scope_profiles = nmf_scope_members = None
@@ -1620,6 +1771,12 @@ def run_pipeline(cfg: dict = None) -> dict:
             louvain_assignments, louvain_profiles, df,
             cluster_matrix, user_index, cluster_grant_index, cfg, "Louvain",
         )
+    leiden_biz_hierarchy = None
+    if leiden_assignments is not None and leiden_profiles is not None:
+        leiden_biz_hierarchy = discover_business_role_hierarchy(
+            leiden_assignments, leiden_profiles, df,
+            cluster_matrix, user_index, cluster_grant_index, cfg, "Leiden",
+        )
     if nmf_assignments is not None and nmf_profiles is not None:
         nmf_biz_hierarchy = discover_business_role_hierarchy(
             nmf_assignments, nmf_profiles, df,
@@ -1634,6 +1791,10 @@ def run_pipeline(cfg: dict = None) -> dict:
         louvain_scope_profiles, louvain_scope_members = discover_scopes(
             louvain_assignments, df, cluster_matrix, user_index, cluster_grant_index, cfg, "Louvain"
         )
+    if leiden_assignments is not None:
+        leiden_scope_profiles, leiden_scope_members = discover_scopes(
+            leiden_assignments, df, cluster_matrix, user_index, cluster_grant_index, cfg, "Leiden"
+        )
     if nmf_assignments is not None:
         nmf_scope_profiles, nmf_scope_members = discover_scopes(
             nmf_assignments, df, cluster_matrix, user_index, cluster_grant_index, cfg, "NMF"
@@ -1645,10 +1806,13 @@ def run_pipeline(cfg: dict = None) -> dict:
         louvain_scope_profiles,  louvain_scope_members,
         nmf_profiles,           nmf_entitlements,
         nmf_scope_profiles,     nmf_scope_members,
-        louvain_assignments,    nmf_assignments,
+        leiden_profiles,        leiden_entitlements,
+        leiden_scope_profiles,  leiden_scope_members,
+        louvain_assignments,    nmf_assignments,    leiden_assignments,
         hier["hierarchy_rows"], top_tranids,
-        louvain_biz_hierarchy,  nmf_biz_hierarchy,
+        louvain_biz_hierarchy,  nmf_biz_hierarchy,  leiden_biz_hierarchy,
         cfg,
+        df=df,
     )
 
     log.info("─" * 60)
@@ -1658,16 +1822,22 @@ def run_pipeline(cfg: dict = None) -> dict:
     return {
         "louvain_assignments":     louvain_assignments,
         "nmf_assignments":         nmf_assignments,
+        "leiden_assignments":      leiden_assignments,
         "louvain_profiles":        louvain_profiles,
         "nmf_profiles":            nmf_profiles,
+        "leiden_profiles":         leiden_profiles,
         "louvain_entitlements":    louvain_entitlements,
         "nmf_entitlements":        nmf_entitlements,
+        "leiden_entitlements":     leiden_entitlements,
         "louvain_biz_hierarchy":   louvain_biz_hierarchy,
         "nmf_biz_hierarchy":       nmf_biz_hierarchy,
+        "leiden_biz_hierarchy":    leiden_biz_hierarchy,
         "louvain_scope_profiles":  louvain_scope_profiles,
         "louvain_scope_members":   louvain_scope_members,
         "nmf_scope_profiles":      nmf_scope_profiles,
         "nmf_scope_members":       nmf_scope_members,
+        "leiden_scope_profiles":   leiden_scope_profiles,
+        "leiden_scope_members":    leiden_scope_members,
         "matrix":                  matrix,
         "user_index":              user_index,
         "grant_index":             grant_index,
@@ -1739,33 +1909,164 @@ def load_entitlements_lean(cfg: dict) -> pd.DataFrame:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="IGA Role Miner")
-    parser.add_argument("--ents",   default=CONFIG["CSV_ENTITLEMENTS"],
-                        help="Path to entitlements CSV")
-    parser.add_argument("--hr",     default=CONFIG["CSV_EMPLOYEES"],
-                        help="Path to employees CSV")
-    parser.add_argument("--apps",   default=CONFIG["CSV_APPLICATIONS"],
-                        help="Path to applications CSV (optional)")
-    parser.add_argument("--out",    default=CONFIG["OUTPUT_DIR"],
-                        help="Output directory")
-    parser.add_argument("--sample", type=int, default=None,
-                        help="Limit to N employees (for testing)")
-    parser.add_argument("--top-tranids", type=int, default=None, metavar="N",
-                        help="Run only the top-N tranid report and exit (default 50)")
-    parser.add_argument("--tier-defs", default=None,
-                        help="Path to tier_definitions CSV (columns: tier, tranid[, notes])")
+    parser = argparse.ArgumentParser(
+        description="IGA Role Miner — discovers candidate enterprise roles from entitlement data.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Minimal run (uses CONFIG defaults)
+  python role_miner.py
+
+  # Override input paths
+  python role_miner.py --ents data/ents.csv --hr data/employees.csv
+
+  # Use pre-defined tier grants instead of dynamic discovery
+  python role_miner.py --tier-defs tier_definitions.csv
+
+  # Generate only the top-50 entitlement report and exit
+  python role_miner.py --top-tranids 50
+
+  # Limit to 500 employees for a quick test run
+  python role_miner.py --sample 500
+
+  # Run only Leiden and NMF, skip Louvain
+  python role_miner.py --no-louvain
+
+  # Full example
+  python role_miner.py \\
+      --ents data/ents.csv --hr data/employees.csv --apps data/apps.csv \\
+      --out results/ --tier-defs tier_definitions.csv \\
+      --leiden-resolution 1.2 --nmf-roles 15
+""",
+    )
+
+    # ── Input / output ────────────────────────────────────────────────────────
+    io = parser.add_argument_group("Input / Output")
+    io.add_argument("--ents",  default=CONFIG["CSV_ENTITLEMENTS"],
+                    metavar="PATH", help="Path to entitlements CSV  (default: %(default)s)")
+    io.add_argument("--hr",    default=CONFIG["CSV_EMPLOYEES"],
+                    metavar="PATH", help="Path to employees CSV  (default: %(default)s)")
+    io.add_argument("--apps",  default=CONFIG["CSV_APPLICATIONS"],
+                    metavar="PATH", help="Path to applications CSV — optional  (default: %(default)s)")
+    io.add_argument("--out",   default=CONFIG["OUTPUT_DIR"],
+                    metavar="DIR",  help="Output directory  (default: %(default)s)")
+
+    # ── Population / sampling ─────────────────────────────────────────────────
+    pop = parser.add_argument_group("Population")
+    pop.add_argument("--sample", type=int, default=None, metavar="N",
+                     help="Limit analysis to N randomly sampled employees (for testing)")
+    pop.add_argument("--min-cluster-size", type=int, default=CONFIG["MIN_CLUSTER_SIZE"],
+                     metavar="N",
+                     help="Minimum employees per role candidate  (default: %(default)s)")
+
+    # ── Tier definitions ──────────────────────────────────────────────────────
+    tier = parser.add_argument_group("Tier Definitions")
+    tier.add_argument("--tier-defs", default=None, metavar="PATH",
+                      help=(
+                          "Path to tier_definitions CSV with columns: tier, tranid[, notes]. "
+                          "When provided, Tier 1 and Tier 2 grants are read from this file "
+                          "instead of being discovered dynamically via prevalence thresholds. "
+                          "tier=1 → Staff root grants (universal).  "
+                          "tier=2 → Staff-with-Tech-Access grants. "
+                          "Grants not listed are treated as residual (Tier 3 / business roles). "
+                          "Produce this file by reviewing top_tranids output and labelling rows."
+                      ))
+    tier.add_argument("--staff-prevalence", type=float,
+                      default=CONFIG["HIER_STAFF_MIN_PREVALENCE"], metavar="FLOAT",
+                      help="Dynamic Tier-1 prevalence floor (ignored when --tier-defs set)  "
+                           "(default: %(default)s)")
+    tier.add_argument("--tech-min", type=float,
+                      default=CONFIG["HIER_TECH_BASELINE_MIN_PREVALENCE"], metavar="FLOAT",
+                      help="Dynamic Tier-2 lower prevalence bound among tech users  "
+                           "(default: %(default)s)")
+    tier.add_argument("--tech-max", type=float,
+                      default=CONFIG["HIER_TECH_BASELINE_MAX_PREVALENCE"], metavar="FLOAT",
+                      help="Dynamic Tier-2 upper prevalence bound among tech users  "
+                           "(default: %(default)s)")
+
+    # ── Algorithm switches ────────────────────────────────────────────────────
+    algo = parser.add_argument_group("Algorithm Switches")
+    algo.add_argument("--no-louvain", action="store_true",
+                      help="Disable Louvain community detection")
+    algo.add_argument("--no-leiden",  action="store_true",
+                      help="Disable Leiden community detection")
+    algo.add_argument("--no-nmf",     action="store_true",
+                      help="Disable NMF matrix factorisation")
+
+    # ── Louvain tuning ────────────────────────────────────────────────────────
+    lou = parser.add_argument_group("Louvain Tuning")
+    lou.add_argument("--louvain-resolution", type=float,
+                     default=CONFIG["LOUVAIN_RESOLUTION"], metavar="FLOAT",
+                     help="Louvain resolution — higher = more, smaller clusters  (default: %(default)s)")
+    lou.add_argument("--louvain-seed", type=int, default=CONFIG["LOUVAIN_SEED"], metavar="INT",
+                     help="Louvain random seed  (default: %(default)s)")
+    lou.add_argument("--louvain-batch", type=int, default=CONFIG["LOUVAIN_BATCH_SIZE"], metavar="N",
+                     help="Similarity rows per batch (RAM control)  (default: %(default)s)")
+
+    # ── Leiden tuning ─────────────────────────────────────────────────────────
+    lei = parser.add_argument_group("Leiden Tuning")
+    lei.add_argument("--leiden-resolution", type=float,
+                     default=CONFIG["LEIDEN_RESOLUTION"], metavar="FLOAT",
+                     help="Leiden resolution — higher = more, smaller clusters  (default: %(default)s)")
+    lei.add_argument("--leiden-seed", type=int, default=CONFIG["LEIDEN_SEED"], metavar="INT",
+                     help="Leiden random seed  (default: %(default)s)")
+    lei.add_argument("--leiden-batch", type=int, default=CONFIG["LEIDEN_BATCH_SIZE"], metavar="N",
+                     help="Similarity rows per batch (RAM control)  (default: %(default)s)")
+
+    # ── NMF tuning ────────────────────────────────────────────────────────────
+    nmf = parser.add_argument_group("NMF Tuning")
+    nmf.add_argument("--nmf-roles", type=int, default=None, metavar="N",
+                     help="Fixed number of NMF role components (default: auto-detect via SVD elbow)")
+    nmf.add_argument("--nmf-min-roles", type=int, default=CONFIG["NMF_MIN_ROLES"], metavar="N",
+                     help="Auto-detect lower bound  (default: %(default)s)")
+    nmf.add_argument("--nmf-max-roles", type=int, default=CONFIG["NMF_MAX_ROLES"], metavar="N",
+                     help="Auto-detect upper bound  (default: %(default)s)")
+    nmf.add_argument("--nmf-seed", type=int, default=CONFIG["NMF_SEED"], metavar="INT",
+                     help="NMF random seed  (default: %(default)s)")
+
+    # ── Quick reports ─────────────────────────────────────────────────────────
+    rpt = parser.add_argument_group("Quick Reports")
+    rpt.add_argument("--top-tranids", type=int, default=None, metavar="N",
+                     help="Generate only the top-N entitlement report and exit (skips full pipeline)")
+
     args = parser.parse_args()
 
+    # ── Build effective config ────────────────────────────────────────────────
     cfg = CONFIG.copy()
     cfg["CSV_ENTITLEMENTS"] = args.ents
     cfg["CSV_EMPLOYEES"]    = args.hr
     cfg["CSV_APPLICATIONS"] = args.apps
     cfg["OUTPUT_DIR"]       = args.out
+
     if args.sample:
-        cfg["SAMPLE_SIZE"]  = args.sample
+        cfg["SAMPLE_SIZE"] = args.sample
+    cfg["MIN_CLUSTER_SIZE"] = args.min_cluster_size
+
     if args.tier_defs:
         cfg["TIER_DEFINITIONS_FILE"] = args.tier_defs
+    cfg["HIER_STAFF_MIN_PREVALENCE"]         = args.staff_prevalence
+    cfg["HIER_TECH_BASELINE_MIN_PREVALENCE"] = args.tech_min
+    cfg["HIER_TECH_BASELINE_MAX_PREVALENCE"] = args.tech_max
 
+    cfg["ENABLE_LOUVAIN"] = not args.no_louvain
+    cfg["ENABLE_LEIDEN"]  = not args.no_leiden
+    cfg["ENABLE_NMF"]     = not args.no_nmf
+
+    cfg["LOUVAIN_RESOLUTION"] = args.louvain_resolution
+    cfg["LOUVAIN_SEED"]       = args.louvain_seed
+    cfg["LOUVAIN_BATCH_SIZE"] = args.louvain_batch
+
+    cfg["LEIDEN_RESOLUTION"] = args.leiden_resolution
+    cfg["LEIDEN_SEED"]       = args.leiden_seed
+    cfg["LEIDEN_BATCH_SIZE"] = args.leiden_batch
+
+    if args.nmf_roles is not None:
+        cfg["NMF_N_ROLES"] = args.nmf_roles
+    cfg["NMF_MIN_ROLES"] = args.nmf_min_roles
+    cfg["NMF_MAX_ROLES"] = args.nmf_max_roles
+    cfg["NMF_SEED"]      = args.nmf_seed
+
+    # ── Quick report mode ─────────────────────────────────────────────────────
     if args.top_tranids is not None:
         df = load_entitlements_lean(cfg)
         n  = args.top_tranids if args.top_tranids > 0 else 50
