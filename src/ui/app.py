@@ -18,7 +18,7 @@ import streamlit as st
 
 from src.algorithms.registry import AlgorithmRegistry
 from src.config import (
-    HierarchyConfig, LouvainConfig, NMFConfig,
+    HierarchyConfig, LeidenConfig, LouvainConfig, NMFConfig,
     PipelineConfig, PipelineResult, PopulationFilter,
 )
 from src.data import DataLoader
@@ -75,6 +75,8 @@ def _algo_widget(algo_name: str, algo_cls, cfg_obj) -> object:
         label = knob["label"]
         help_ = knob.get("help", "")
         cur   = getattr(cfg_obj, key, knob["default"])
+        if cur is None:
+            cur = knob["default"]
 
         if knob["type"] == "slider":
             updates[key] = st.slider(
@@ -247,7 +249,8 @@ with st.sidebar:
             )
             if enabled:
                 enabled_algos.append(algo_name)
-                default_cfg = LouvainConfig() if algo_name == "louvain" else NMFConfig()
+                _cfg_map = {"louvain": LouvainConfig, "leiden": LeidenConfig, "nmf": NMFConfig}
+                default_cfg = _cfg_map.get(algo_name, LouvainConfig)()
                 with st.expander(f"⚙ {algo_name} settings"):
                     algo_configs[algo_name] = _algo_widget(algo_name, algo_cls, default_cfg)
 
