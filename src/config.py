@@ -243,8 +243,9 @@ class AlgorithmResult:
     profiles:         Optional[pd.DataFrame] = None  # role_profiles.csv
     entitlements:     Optional[pd.DataFrame] = None  # role_entitlements.csv
     biz_hierarchy:    Optional[pd.DataFrame] = None  # business_role_hierarchy.csv
-    unassigned_users: Optional[pd.DataFrame] = None  # ritsid of users in sub-threshold clusters
-    orphan_grants:    Optional[pd.DataFrame] = None  # grants not core to any role
+    unassigned_users:  Optional[pd.DataFrame] = None  # ritsid of users in sub-threshold clusters
+    orphan_grants:     Optional[pd.DataFrame] = None  # grants not core to any role
+    app_scope_summary: Optional[pd.DataFrame] = None  # (cluster_id, csiid) Phase-A enrichment
     @property
     def n_roles(self) -> int:
         if self.profiles is None or self.profiles.empty:

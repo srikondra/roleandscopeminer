@@ -21,6 +21,63 @@ from .config import PipelineConfig
 log = logging.getLogger("role_miner.analysis")
 
 
+# ── App-scope summary (Phase A) ─────────────────────────────────────────────────
+
+def build_app_scope_summary(entitlements_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Summarise role entitlements by (cluster_id, csiid).
+
+    For each discovered role, groups all grants by their CSIID to show which
+    applications contribute to the role, at what depth, and at what prevalence.
+    This is Phase A of CSIID-aware analysis — pure post-processing, no algorithm change.
+
+    Returns a DataFrame with columns:
+        cluster_id, csiid, grant_count, core_grant_count,
+        avg_prevalence, max_prevalence, top_tranids
+    """
+    if entitlements_df is None or entitlements_df.empty:
+        return pd.DataFrame()
+
+    df = entitlements_df.copy()
+    df["_csiid"]  = df["grant_id"].str.split("|").str[0]
+    df["_tranid"] = df["grant_id"].str.split("|").str[1]
+
+    summary = (
+        df.groupby(["cluster_id", "_csiid"])
+        .agg(
+            grant_count      = ("grant_id",   "count"),
+            core_grant_count = ("is_core",    "sum"),
+            avg_prevalence   = ("prevalence", "mean"),
+            max_prevalence   = ("prevalence", "max"),
+        )
+        .reset_index()
+        .rename(columns={"_csiid": "csiid"})
+    )
+
+    # Top-3 tranids per (cluster_id, csiid) by prevalence for readability
+    top_tranids = (
+        df.sort_values("prevalence", ascending=False)
+          .groupby(["cluster_id", "_csiid"])["_tranid"]
+          .apply(lambda s: " | ".join(s.head(3).tolist()))
+          .reset_index()
+          .rename(columns={"_csiid": "csiid", "_tranid": "top_tranids"})
+    )
+
+    summary = summary.merge(top_tranids, on=["cluster_id", "csiid"], how="left")
+    summary["avg_prevalence"] = summary["avg_prevalence"].round(3)
+    summary["max_prevalence"] = summary["max_prevalence"].round(3)
+    summary = summary.sort_values(
+        ["cluster_id", "grant_count"], ascending=[True, False]
+    ).reset_index(drop=True)
+
+    log.info(
+        "App-scope summary: %d (role, csiid) pairs across %d roles",
+        len(summary),
+        summary["cluster_id"].nunique(),
+    )
+    return summary
+
+
 # ── RoleProfiler ───────────────────────────────────────────────────────────────
 
 def _top_values(series: pd.Series, n: int = 3) -> str:

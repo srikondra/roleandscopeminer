@@ -31,7 +31,7 @@ from .config import PipelineConfig, AlgorithmResult, PipelineResult
 from .data import DataLoader, build_user_entitlement_matrix, top_tranid_by_population
 from .hierarchy import TierDiscovery, BusinessRoleHierarchy
 from .algorithms.registry import AlgorithmRegistry
-from .analysis import RoleProfiler
+from .analysis import RoleProfiler, build_app_scope_summary
 
 log = logging.getLogger("role_miner.pipeline")
 
@@ -116,6 +116,18 @@ class PipelineRunner:
                 primary, df, cluster_matrix, user_index, cluster_grant_index, algo_name
             )
 
+            # ── Phase A: CSIID app-scope summary ───────────────────────────────
+            app_scope = build_app_scope_summary(entitlements)
+            if not app_scope.empty and not profiles.empty:
+                top_csiids_map = (
+                    app_scope
+                    .sort_values(["cluster_id", "grant_count"], ascending=[True, False])
+                    .groupby("cluster_id")["csiid"]
+                    .apply(lambda s: " | ".join(s.head(3).tolist()))
+                )
+                profiles = profiles.copy()
+                profiles["top_csiids"] = profiles["cluster_id"].map(top_csiids_map).fillna("")
+
             _ap("Building business role hierarchy …", 0.60)
             biz_df = biz_hier.discover(
                 primary, profiles, df,
@@ -131,6 +143,7 @@ class PipelineRunner:
                 biz_hierarchy=biz_df,
                 unassigned_users=unassigned_users if not unassigned_users.empty else None,
                 orphan_grants=orphan_grants if not orphan_grants.empty else None,
+                app_scope_summary=app_scope if not app_scope.empty else None,
             )
 
         # ── 7. Save ────────────────────────────────────────────────────────────
@@ -162,12 +175,13 @@ class PipelineRunner:
 
         # Per-algorithm
         for algo_name, ar in result.algorithm_results.items():
-            _save(ar.profiles,         f"{algo_name}_role_profiles")
-            _save(ar.entitlements,     f"{algo_name}_role_entitlements")
-            _save(ar.biz_hierarchy,    f"{algo_name}_business_role_hierarchy")
-            _save(ar.memberships,      f"{algo_name}_role_memberships")
-            _save(ar.unassigned_users, f"{algo_name}_unassigned_users")
-            _save(ar.orphan_grants,    f"{algo_name}_orphan_grants")
+            _save(ar.profiles,          f"{algo_name}_role_profiles")
+            _save(ar.entitlements,      f"{algo_name}_role_entitlements")
+            _save(ar.app_scope_summary, f"{algo_name}_role_app_scope_summary")
+            _save(ar.biz_hierarchy,     f"{algo_name}_business_role_hierarchy")
+            _save(ar.memberships,       f"{algo_name}_role_memberships")
+            _save(ar.unassigned_users,  f"{algo_name}_unassigned_users")
+            _save(ar.orphan_grants,     f"{algo_name}_orphan_grants")
 
         # Unified hierarchy
         unified = result.unified_hierarchy()

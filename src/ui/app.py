@@ -483,6 +483,7 @@ elif result is not None:
         "🏢 Business Roles",
         "👥 User Assignments",
         "📊 Top Tranids",
+        "🔬 App Scope",
         "📥 Downloads",
     ])
 
@@ -569,8 +570,42 @@ elif result is not None:
         else:
             st.info("No top-tranid data.")
 
-    # ── Tab 5: Downloads ──────────────────────────────────────────────────────
+    # ── Tab 5: App Scope (Phase A) ────────────────────────────────────────────
     with tabs[4]:
+        has_scope = any(
+            ar.app_scope_summary is not None and not ar.app_scope_summary.empty
+            for ar in result.algorithm_results.values()
+        )
+        if not has_scope:
+            st.info("No app-scope data available.")
+        else:
+            for algo_name, ar in result.algorithm_results.items():
+                if ar.app_scope_summary is None or ar.app_scope_summary.empty:
+                    continue
+
+                scope_df = ar.app_scope_summary
+                n_role_csiid_pairs = len(scope_df)
+                n_multi_app_roles  = (
+                    scope_df.groupby("cluster_id")["csiid"].nunique() > 1
+                ).sum()
+
+                st.subheader(f"{algo_name.upper()}")
+                ma, mb, mc = st.columns(3)
+                ma.metric("Role × App pairs",   f"{n_role_csiid_pairs:,}")
+                mb.metric("Multi-app roles",    f"{n_multi_app_roles:,}",
+                          help="Roles whose members span more than one CSIID")
+                mc.metric("Unique CSIIDs",
+                          f"{scope_df['csiid'].nunique():,}")
+
+                all_roles = ["(all)"] + sorted(scope_df["cluster_id"].unique().tolist())
+                sel_role  = st.selectbox(
+                    "Filter by role", all_roles, key=f"scope_role_{algo_name}"
+                )
+                view = scope_df if sel_role == "(all)" else scope_df[scope_df["cluster_id"] == sel_role]
+                st.dataframe(view, use_container_width=True, hide_index=True)
+
+    # ── Tab 6: Downloads ──────────────────────────────────────────────────────
+    with tabs[5]:
         st.subheader("Download Results")
         col1, col2 = st.columns(2)
 
@@ -587,7 +622,8 @@ elif result is not None:
         with col2:
             for algo_name, ar in result.algorithm_results.items():
                 st.caption(f"**{algo_name.upper()}**")
-                _download_btn(ar.profiles,         "Role Profiles",           f"{algo_name}_profiles.csv")
+                _download_btn(ar.profiles,          "Role Profiles",           f"{algo_name}_profiles.csv")
+                _download_btn(ar.app_scope_summary,"App Scope Summary",       f"{algo_name}_app_scope_summary.csv")
                 _download_btn(ar.biz_hierarchy,    "Business Role Hierarchy", f"{algo_name}_biz_hierarchy.csv")
                 _download_btn(ar.unassigned_users, "Unassigned Users",        f"{algo_name}_unassigned_users.csv")
                 _download_btn(ar.orphan_grants,    "Orphan Grants",           f"{algo_name}_orphan_grants.csv")
