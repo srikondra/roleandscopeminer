@@ -185,87 +185,92 @@ df_raw: pd.DataFrame | None = st.session_state.get("df_raw")
 with st.container(border=True):
     st.markdown("**Select Staff**")
 
-    with st.expander("📁 Data Sources"):
-        ents_path   = st.text_input("Entitlements CSV",  "sample_data/sample_entitlements.csv", key="p_ents")
-        hr_path     = st.text_input("Employees CSV",     "sample_data/sample_employees.csv",    key="p_hr")
-        apps_path   = st.text_input("Applications CSV",  "sample_data/sample_applications.csv", key="p_apps")
-        tier_defs   = st.text_input(
-            "Tier Definitions CSV (optional)", "", key="p_tierdefs",
-            help="tier,tranid[,notes] — leave blank for dynamic discovery",
-        )
-        sample_size = st.number_input(
-            "Sample Size (0 = all users)", min_value=0, value=0,
-            step=100, key="p_sample",
-            help="Limit employees for quick testing",
-        )
-
-    sample_val: int | None = int(sample_size) if sample_size > 0 else None
-
     pop_mode = st.radio(
-        "Filter population",
-        ["All Staff", "Upload CSV", "Filter by HR Attributes"],
+        "Staff selection mode",
+        ["All Staff", "Upload CSV", "Filter & Select by HR Attributes", "Sample Data"],
+        index=3,  # default: Sample Data (only active option)
         key="pop_mode",
         horizontal=True,
         label_visibility="collapsed",
     )
 
-    pop_filter = PopulationFilter()
+    # ── Defaults (overridden only in Sample Data mode) ─────────────────────────
+    ents_path   = "sample_data/sample_entitlements.csv"
+    hr_path     = "sample_data/sample_employees.csv"
+    apps_path   = "sample_data/sample_applications.csv"
+    tier_defs   = ""
+    sample_size = 0
+    pop_filter  = PopulationFilter()
 
-    if pop_mode == "Filter by HR Attributes":
-        if df_raw is not None:
-            st.caption("AND logic across dimensions.")
-            cfg_tmp = PipelineConfig()
-            ms_selections: dict[str, list[str]] = {}
-            with st.expander("MS Segment Hierarchy"):
-                for lvl in cfg_tmp.segment_cols:
-                    vals = _unique_vals(df_raw, lvl)
-                    if vals:
-                        chosen = st.multiselect(lvl.replace("_", " ").title(), vals, key=f"ms_{lvl}")
-                        if chosen:
-                            ms_selections[lvl] = chosen
-            mg_selections: dict[str, list[str]] = {}
-            with st.expander("MG Geo Hierarchy"):
-                for lvl in cfg_tmp.geo_cols:
-                    vals = _unique_vals(df_raw, lvl)
-                    if vals:
-                        chosen = st.multiselect(lvl.replace("_", " ").title(), vals, key=f"mg_{lvl}")
-                        if chosen:
-                            mg_selections[lvl] = chosen
-            c1, c2, c3, c4 = st.columns(4)
-            jf   = c1.multiselect("Job Function", _unique_vals(df_raw, "jobfunctiondescription"), key="pop_jf")
-            jfam = c2.multiselect("Job Family",   _unique_vals(df_raw, "jobfamilydescription"),   key="pop_jfam")
-            reg  = c3.multiselect("Region",        _unique_vals(df_raw, "region"),                key="pop_reg")
-            cty  = c4.multiselect("Country",       _unique_vals(df_raw, "country"),               key="pop_cty")
-            pop_filter = PopulationFilter(
-                ms_levels=ms_selections, mg_levels=mg_selections,
-                job_functions=jf, job_families=jfam, regions=reg, countries=cty,
-            )
-            if not pop_filter.is_empty:
-                n_filtered = pop_filter.apply(df_raw)["ritsid"].nunique()
-                st.info(f"Filter matches **{n_filtered:,}** users")
-        else:
-            st.info("Load data first to use HR attribute filters.")
-
-    elif pop_mode == "Upload CSV":
-        uploaded = st.file_uploader(
-            "Upload CSV or TXT with ritsid column", type=["csv", "txt"], key="pop_upload"
+    # ── All Staff ──────────────────────────────────────────────────────────────
+    if pop_mode == "All Staff":
+        st.markdown(
+            "<div style='color:#aaa;font-size:0.85rem;padding:0.5rem 0'>"
+            "Connects to the enterprise identity store to pull the full staff roster "
+            "and their entitlements. No local files required.</div>",
+            unsafe_allow_html=True,
         )
-        if uploaded:
-            try:
-                up_df  = pd.read_csv(uploaded, dtype=str)
-                id_col = next(
-                    (c for c in up_df.columns if c.lower() in ("ritsid", "userid", "user_id")),
-                    up_df.columns[0],
-                )
-                ritsids = up_df[id_col].dropna().str.strip().tolist()
-                pop_filter = PopulationFilter(ritsids=ritsids)
-                st.success(f"Loaded {len(ritsids):,} user IDs from '{id_col}'")
-            except Exception as exc:
-                st.error(f"Could not parse upload: {exc}")
-    else:
-        st.caption("All users in the dataset will be mined.")
+        c1, c2 = st.columns(2)
+        c1.text_input("Identity Store URL", placeholder="https://iga.corp/api/v1/...",
+                      disabled=True, key="all_staff_url")
+        c2.text_input("Authentication Token", placeholder="Bearer …",
+                      disabled=True, key="all_staff_token")
+        st.caption("🚧 Coming soon — only **Sample Data** is active in this release.")
 
-    # Status + Load button
+    # ── Upload CSV ─────────────────────────────────────────────────────────────
+    elif pop_mode == "Upload CSV":
+        st.markdown(
+            "<div style='color:#aaa;font-size:0.85rem;padding:0.5rem 0'>"
+            "Upload your own entitlement export and HR/employee file to mine roles "
+            "against a custom dataset.</div>",
+            unsafe_allow_html=True,
+        )
+        c1, c2 = st.columns(2)
+        c1.file_uploader("Entitlements CSV", type=["csv"], disabled=True, key="upl_ents")
+        c2.file_uploader("Employees / HR CSV", type=["csv"], disabled=True, key="upl_hr")
+        st.caption("🚧 Coming soon — only **Sample Data** is active in this release.")
+
+    # ── Filter & Select by HR Attributes ─────────────────────────────────────
+    elif pop_mode == "Filter & Select by HR Attributes":
+        st.markdown(
+            "<div style='color:#aaa;font-size:0.85rem;padding:0.3rem 0 0.6rem'>"
+            "Narrow the population to mine by intersecting org hierarchy, job, "
+            "and geography dimensions (AND logic across dimensions).</div>",
+            unsafe_allow_html=True,
+        )
+        r1c1, r1c2, r1c3, r1c4 = st.columns(4)
+        r1c1.multiselect("MS Levels",   [], disabled=True, key="hr_ms",
+                         help="Managed Segment org hierarchy levels")
+        r1c2.multiselect("MG Levels",   [], disabled=True, key="hr_mg",
+                         help="Managed Geography org hierarchy levels")
+        r1c3.multiselect("Department",  [], disabled=True, key="hr_dept")
+        r1c4.multiselect("Manager",     [], disabled=True, key="hr_mgr")
+        r2c1, r2c2, r2c3, r2c4 = st.columns(4)
+        r2c1.multiselect("Job Function", [], disabled=True, key="hr_jf")
+        r2c2.multiselect("Job Family",   [], disabled=True, key="hr_jfam")
+        r2c3.multiselect("Region",       [], disabled=True, key="hr_reg")
+        r2c4.multiselect("Country",      [], disabled=True, key="hr_cty")
+        st.caption("🚧 Coming soon — only **Sample Data** is active in this release.")
+
+    # ── Sample Data (active) ───────────────────────────────────────────────────
+    else:  # pop_mode == "Sample Data"
+        with st.expander("📁 Data Sources", expanded=False):
+            ents_path   = st.text_input("Entitlements CSV",  "sample_data/sample_entitlements.csv", key="p_ents")
+            hr_path     = st.text_input("Employees CSV",     "sample_data/sample_employees.csv",    key="p_hr")
+            apps_path   = st.text_input("Applications CSV",  "sample_data/sample_applications.csv", key="p_apps")
+            tier_defs   = st.text_input(
+                "Tier Definitions CSV (optional)", "", key="p_tierdefs",
+                help="tier,tranid[,notes] — leave blank for dynamic discovery",
+            )
+            sample_size = st.number_input(
+                "Row limit (0 = all)", min_value=0, value=0,
+                step=100, key="p_sample",
+                help="Limit the number of employees loaded — useful for quick testing",
+            )
+
+    sample_val: int | None = int(sample_size) if sample_size > 0 else None
+
+    # Status + Load button (Load disabled for all modes except Sample Data)
     stat_col, load_col = st.columns([5, 1])
     with stat_col:
         if df_raw is not None:
@@ -273,9 +278,14 @@ with st.container(border=True):
                 f"✓ **{df_raw['ritsid'].nunique():,}** users · "
                 f"**{df_raw['grant_id'].nunique():,}** grants loaded"
             )
-    load_btn = load_col.button("Load Data", key="load_btn", use_container_width=True)
+    load_disabled = (pop_mode != "Sample Data")
+    load_btn = load_col.button(
+        "Load Data", key="load_btn",
+        disabled=load_disabled,
+        use_container_width=True,
+    )
 
-    if load_btn:
+    if load_btn and not load_disabled:
         with st.spinner("Loading …"):
             try:
                 df_raw = _load_data_cached(ents_path, hr_path, apps_path or None, sample_val)
@@ -312,6 +322,7 @@ with st.container(border=True):
                     value=True,
                     key=f"algo_en_{algo_name}",
                 )
+                st.caption(getattr(algo_cls, "description", ""))
                 with st.expander(f"⚙ {algo_name} settings", expanded=False):
                     updated_cfg = _algo_widget(algo_name, algo_cls, default_cfg)
             if enabled:
