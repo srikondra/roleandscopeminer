@@ -25,7 +25,7 @@ except ImportError as exc:
         "Run: pip install networkx python-louvain"
     ) from exc
 
-from .base import RoleAlgorithm
+from .base import AlgorithmFitResult, RoleAlgorithm
 from .registry import AlgorithmRegistry
 
 log = logging.getLogger("role_miner.louvain")
@@ -82,7 +82,7 @@ class LouvainAlgorithm(RoleAlgorithm):
         ]
         assignments = pd.DataFrame(rows)
         log.info("Louvain: %d clusters discovered", assignments["role_id"].nunique())
-        return assignments
+        return AlgorithmFitResult(primary=assignments, memberships=assignments.copy())
 
     @property
     def config_schema(self) -> list[dict]:

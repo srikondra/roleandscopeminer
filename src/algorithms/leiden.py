@@ -26,7 +26,7 @@ except ImportError as exc:
         "Run: pip install leidenalg igraph"
     ) from exc
 
-from .base import RoleAlgorithm
+from .base import AlgorithmFitResult, RoleAlgorithm
 from .registry import AlgorithmRegistry
 
 log = logging.getLogger("role_miner.leiden")
@@ -93,7 +93,7 @@ class LeidenAlgorithm(RoleAlgorithm):
         ]
         assignments = pd.DataFrame(rows)
         log.info("Leiden: %d clusters discovered", assignments["role_id"].nunique())
-        return assignments
+        return AlgorithmFitResult(primary=assignments, memberships=assignments.copy())
 
     @property
     def config_schema(self) -> list[dict]:

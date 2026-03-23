@@ -100,31 +100,37 @@ class PipelineRunner:
 
             _ap("Clustering users …", 0.0)
             try:
-                algo     = AlgorithmRegistry.get(algo_name)
-                algo_cfg = getattr(cfg, algo_name, None)
-                assignments = algo.fit(cluster_matrix, user_index, algo_cfg)
+                algo       = AlgorithmRegistry.get(algo_name)
+                algo_cfg   = getattr(cfg, algo_name, None)
+                fit_result = algo.fit(cluster_matrix, user_index, algo_cfg)
             except Exception as exc:
                 log.error("Algorithm '%s' failed: %s", algo_name, exc, exc_info=True)
                 result.algorithm_results[algo_name] = AlgorithmResult(method=algo_name)
                 continue
 
+            primary     = fit_result.primary      # 1:1 — one row per user
+            memberships = fit_result.memberships  # 1:N — one row per (user, role)
+
             _ap("Profiling clusters …", 0.35)
-            profiles, entitlements = profiler.analyze(
-                assignments, df, cluster_matrix, user_index, cluster_grant_index, algo_name
+            profiles, entitlements, unassigned_users, orphan_grants = profiler.analyze(
+                primary, df, cluster_matrix, user_index, cluster_grant_index, algo_name
             )
 
             _ap("Building business role hierarchy …", 0.60)
             biz_df = biz_hier.discover(
-                assignments, profiles, df,
+                primary, profiles, df,
                 cluster_matrix, user_index, cluster_grant_index, algo_name
             )
 
             result.algorithm_results[algo_name] = AlgorithmResult(
                 method=algo_name,
-                assignments=assignments,
+                assignments=primary,
+                memberships=memberships,
                 profiles=profiles,
                 entitlements=entitlements,
                 biz_hierarchy=biz_df,
+                unassigned_users=unassigned_users if not unassigned_users.empty else None,
+                orphan_grants=orphan_grants if not orphan_grants.empty else None,
             )
 
         # ── 7. Save ────────────────────────────────────────────────────────────
@@ -156,9 +162,12 @@ class PipelineRunner:
 
         # Per-algorithm
         for algo_name, ar in result.algorithm_results.items():
-            _save(ar.profiles,       f"{algo_name}_role_profiles")
-            _save(ar.entitlements,   f"{algo_name}_role_entitlements")
-            _save(ar.biz_hierarchy,  f"{algo_name}_business_role_hierarchy")
+            _save(ar.profiles,         f"{algo_name}_role_profiles")
+            _save(ar.entitlements,     f"{algo_name}_role_entitlements")
+            _save(ar.biz_hierarchy,    f"{algo_name}_business_role_hierarchy")
+            _save(ar.memberships,      f"{algo_name}_role_memberships")
+            _save(ar.unassigned_users, f"{algo_name}_unassigned_users")
+            _save(ar.orphan_grants,    f"{algo_name}_orphan_grants")
 
         # Unified hierarchy
         unified = result.unified_hierarchy()
@@ -175,9 +184,10 @@ class PipelineRunner:
                 empid_map  = base["empid"].to_dict()
         assign_frames = []
         for algo_name, ar in result.algorithm_results.items():
-            if ar.assignments is None or ar.assignments.empty:
+            src = ar.memberships if ar.memberships is not None else ar.assignments
+            if src is None or src.empty:
                 continue
-            a = ar.assignments.copy()
+            a = src.copy()
             a["userid"] = a["ritsid"].map(userid_map).fillna("")
             a["empid"]  = a["ritsid"].map(empid_map).fillna("")
             a["method"] = algo_name

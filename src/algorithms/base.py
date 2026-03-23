@@ -13,9 +13,24 @@ That's it — the UI and pipeline pick it up automatically.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import NamedTuple
 
 import pandas as pd
 from scipy.sparse import csr_matrix
+
+
+class AlgorithmFitResult(NamedTuple):
+    """
+    Return type for RoleAlgorithm.fit().
+
+    primary     : ritsid → role_id, exactly one row per user (dominant/best role).
+    memberships : ritsid → role_id, one row per (user, role) pair — a user may
+                  appear in multiple rows when they have significant membership in
+                  more than one role (e.g. NMF soft-clustering above threshold).
+                  For hard-partition algorithms (Louvain, Leiden) this equals primary.
+    """
+    primary:     pd.DataFrame   # columns: ritsid, role_id  (1:1)
+    memberships: pd.DataFrame   # columns: ritsid, role_id  (1:N)
 
 
 class RoleAlgorithm(ABC):
@@ -23,8 +38,7 @@ class RoleAlgorithm(ABC):
     Contract every role mining algorithm must satisfy.
 
     The pipeline calls fit() on the *residual* matrix (Tier 1 and Tier 2
-    columns already stripped) and expects a DataFrame with columns [ritsid, role_id] back.
-    A user may appear in multiple rows if they belong to more than one role.
+    columns already stripped) and expects an AlgorithmFitResult back.
     """
 
     #: Unique short identifier — used in output filenames and UI toggles.
@@ -39,7 +53,7 @@ class RoleAlgorithm(ABC):
         matrix: csr_matrix,
         user_index: list[str],
         algo_cfg,           # typed sub-config from PipelineConfig (e.g. LouvainConfig)
-    ) -> pd.DataFrame:
+    ) -> AlgorithmFitResult:
         """
         Cluster users into role candidates.
 
@@ -51,9 +65,11 @@ class RoleAlgorithm(ABC):
 
         Returns
         -------
-        pd.DataFrame : columns=[ritsid, role_id] — one row per (employee, role) membership.
-                       A single employee may appear in multiple rows if they belong to multiple roles.
-                       Every ritsid in user_index must appear in at least one row.
+        AlgorithmFitResult
+            primary     : one row per user — their single best/dominant role
+            memberships : one row per (user, role) pair — every role the user
+                          has significant membership in; equals primary for
+                          hard-partition algorithms
         """
         ...
 

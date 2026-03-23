@@ -17,7 +17,7 @@ import pandas as pd
 from scipy.sparse import csr_matrix
 from sklearn.decomposition import NMF as _NMF
 
-from .base import RoleAlgorithm
+from .base import AlgorithmFitResult, RoleAlgorithm
 from .registry import AlgorithmRegistry
 
 log = logging.getLogger("role_miner.nmf")
@@ -57,25 +57,28 @@ class NMFAlgorithm(RoleAlgorithm):
         W         = model.fit_transform(matrix.astype(float))   # users × roles
         threshold = getattr(algo_cfg, "membership_threshold", 0.10)
 
-        rows = []
+        primary_rows    = []
+        membership_rows = []
         for i, ritsid in enumerate(user_index):
             row_sum  = W[i].sum()
             w_norm   = W[i] / max(row_sum, 1e-10)
             dominant = int(np.argmax(W[i]))
+            primary_rows.append({"ritsid": ritsid, "role_id": f"NMFRole{dominant + 1}"})
             assigned = False
             for j, frac in enumerate(w_norm):
                 if frac >= threshold:
-                    rows.append({"ritsid": ritsid, "role_id": f"NMFRole{j + 1}"})
+                    membership_rows.append({"ritsid": ritsid, "role_id": f"NMFRole{j + 1}"})
                     assigned = True
             if not assigned:                          # always assign at least the dominant role
-                rows.append({"ritsid": ritsid, "role_id": f"NMFRole{dominant + 1}"})
+                membership_rows.append({"ritsid": ritsid, "role_id": f"NMFRole{dominant + 1}"})
 
-        assignments = pd.DataFrame(rows)
-        n_roles_out = assignments["role_id"].nunique()
-        n_multi     = (assignments.groupby("ritsid").size() > 1).sum()
+        primary     = pd.DataFrame(primary_rows)
+        memberships = pd.DataFrame(membership_rows)
+        n_roles_out = primary["role_id"].nunique()
+        n_multi     = (memberships.groupby("ritsid").size() > 1).sum()
         log.info("NMF: %d roles discovered  |  %d users with multiple role memberships",
                  n_roles_out, n_multi)
-        return assignments
+        return AlgorithmFitResult(primary=primary, memberships=memberships)
 
     @property
     def config_schema(self) -> list[dict]:

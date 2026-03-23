@@ -60,6 +60,11 @@ class HierarchyConfig(BaseModel):
         description="Grants below this floor are excluded from hierarchy output")
     business_min_tier_grants:      int   = Field(2, gt=0,
         description="Minimum grants per sub-tier (prevents single-grant micro-tiers)")
+    # Orphan / unassigned grants
+    orphan_grant_max_role_prevalence: float = Field(0.50, ge=0.0, le=1.0,
+        description="A grant is flagged orphan if its prevalence in its best-fit role "
+                    "is below this threshold.  0.50 = 'must be held by a majority of "
+                    "a role's members to be claimed'; lower = fewer orphans.")
 
 
 # ── Population filter ──────────────────────────────────────────────────────────
@@ -233,10 +238,13 @@ class TierResult:
 class AlgorithmResult:
     """All outputs produced by one role mining algorithm."""
     method:         str
-    assignments:    Optional[pd.DataFrame] = None  # columns: ritsid, role_id (one row per membership)
-    profiles:       Optional[pd.DataFrame] = None  # role_profiles.csv
-    entitlements:   Optional[pd.DataFrame] = None  # role_entitlements.csv
-    biz_hierarchy:  Optional[pd.DataFrame] = None  # business_role_hierarchy.csv
+    assignments:      Optional[pd.DataFrame] = None  # ritsid → role_id, one row per user (primary/dominant role)
+    memberships:      Optional[pd.DataFrame] = None  # ritsid → role_id, one row per (user, role) pair (1:N)
+    profiles:         Optional[pd.DataFrame] = None  # role_profiles.csv
+    entitlements:     Optional[pd.DataFrame] = None  # role_entitlements.csv
+    biz_hierarchy:    Optional[pd.DataFrame] = None  # business_role_hierarchy.csv
+    unassigned_users: Optional[pd.DataFrame] = None  # ritsid of users in sub-threshold clusters
+    orphan_grants:    Optional[pd.DataFrame] = None  # grants not core to any role
     @property
     def n_roles(self) -> int:
         if self.profiles is None or self.profiles.empty:

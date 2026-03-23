@@ -40,15 +40,28 @@ class RoleProfiler:
         user_index: list[str],
         grant_index: list[str],
         method_prefix: str,
-    ) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """Profile every cluster meeting MIN_CLUSTER_SIZE. Returns (profiles, entitlements)."""
-        profiles   = []
-        all_grants = []
-        min_size   = self.cfg.min_cluster_size
+    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """
+        Profile every cluster meeting min_cluster_size.
+
+        Returns (profiles, entitlements, unassigned_users, orphan_grants).
+
+        unassigned_users : users whose cluster was too small to form a role.
+        orphan_grants    : grants whose best prevalence across all profiled roles
+                           is below orphan_grant_max_role_prevalence; these do not
+                           belong cleanly to any role.
+        """
+        profiles        = []
+        all_grants      = []
+        min_size        = self.cfg.min_cluster_size
+        orphan_thresh   = self.cfg.hierarchy.orphan_grant_max_role_prevalence
+
+        unassigned_ritsids: list[str] = []
 
         for cid, group in assignments.groupby("role_id"):
             members = group["ritsid"].tolist()
             if len(members) < min_size:
+                unassigned_ritsids.extend(members)
                 continue
             prof, grants = self._profile_cluster(
                 cid, members, df, matrix, user_index, grant_index
@@ -68,9 +81,65 @@ class RoleProfiler:
                 .drop(columns=["_csiid"])
                 .reset_index(drop=True)
             )
-        log.info("[%s] Profiled %d roles (min_size=%d)",
-                 method_prefix, len(profiles_df), min_size)
-        return profiles_df, entitlements_df
+
+        # ── Unassigned users ───────────────────────────────────────────────────
+        unassigned_df = pd.DataFrame({"ritsid": unassigned_ritsids})
+        if not unassigned_df.empty and df is not None:
+            hr_cols = ["ritsid"] + [
+                c for c in ("userid", "empid", "jobfunctiondescription",
+                            "jobfamilydescription", "region", "country")
+                if c in df.columns
+            ]
+            hr_map = df.drop_duplicates("ritsid").set_index("ritsid")[
+                [c for c in hr_cols if c != "ritsid"]
+            ]
+            unassigned_df = unassigned_df.join(hr_map, on="ritsid", how="left")
+
+        # ── Orphan grants ──────────────────────────────────────────────────────
+        # Grant is orphan if its max prevalence across all profiled roles < threshold,
+        # OR if it is held exclusively by unassigned users.
+        orphan_df = pd.DataFrame()
+        if not entitlements_df.empty:
+            best_prev = (
+                entitlements_df
+                .groupby("grant_id")["prevalence"]
+                .max()
+                .reset_index()
+                .rename(columns={"prevalence": "best_role_prevalence"})
+            )
+            orphan_by_prev = best_prev[
+                best_prev["best_role_prevalence"] < orphan_thresh
+            ].copy()
+            orphan_by_prev["reason"] = "low_role_prevalence"
+
+            # Grants held only by unassigned users (not in any profiled role at all)
+            all_role_grant_ids = set(entitlements_df["grant_id"].unique())
+            if unassigned_ritsids and matrix is not None:
+                u_idx    = {u: i for i, u in enumerate(user_index)}
+                ua_rows  = [u_idx[r] for r in unassigned_ritsids if r in u_idx]
+                if ua_rows:
+                    ua_sub     = matrix[ua_rows, :]
+                    ua_counts  = np.asarray(ua_sub.sum(axis=0)).flatten()
+                    ua_gids    = {grant_index[j] for j in np.where(ua_counts > 0)[0]}
+                    ua_only    = ua_gids - all_role_grant_ids
+                    if ua_only:
+                        ua_df = pd.DataFrame({
+                            "grant_id":            sorted(ua_only),
+                            "best_role_prevalence": 0.0,
+                            "reason":              "unassigned_users_only",
+                        })
+                        orphan_by_prev = pd.concat(
+                            [orphan_by_prev, ua_df], ignore_index=True
+                        ).drop_duplicates(subset="grant_id")
+
+            orphan_df = orphan_by_prev.sort_values("best_role_prevalence").reset_index(drop=True)
+
+        log.info(
+            "[%s] Profiled %d roles (min_size=%d) | %d unassigned users | %d orphan grants",
+            method_prefix, len(profiles_df), min_size,
+            len(unassigned_df), len(orphan_df),
+        )
+        return profiles_df, entitlements_df, unassigned_df, orphan_df
 
     def _profile_cluster(
         self,

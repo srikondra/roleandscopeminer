@@ -293,9 +293,21 @@ with st.sidebar:
         gap  = st.slider("Sub-tier gap threshold", 0.05, 0.5, 0.20, 0.05, key="biz_gap",
                          help="Prevalence drop that opens a new sub-tier")
         floor = st.slider("Min grant prevalence floor", 0.01, 0.5, 0.10, 0.01, key="biz_floor")
+
+        st.caption("**Orphan / Unassigned grants**")
+        orphan_thresh = st.slider(
+            "Orphan grant threshold", 0.10, 1.0, 0.50, 0.05, key="orphan_thresh",
+            help=(
+                "A grant is flagged as orphan/unassigned if its prevalence in its "
+                "best-fit role is below this value.  "
+                "0.50 = must be held by a majority of a role's members to be 'claimed'.  "
+                "Higher → more grants become orphan."
+            ),
+        )
         hier_cfg = hier_cfg.model_copy(update=dict(
             business_gap_threshold=gap,
             business_min_prevalence=floor,
+            orphan_grant_max_role_prevalence=orphan_thresh,
         ))
 
     st.divider()
@@ -441,22 +453,41 @@ else:
 
     # ── Tab 3: User Assignments ────────────────────────────────────────────────
     with tabs[2]:
-        frames = []
-        for algo_name, ar in result.algorithm_results.items():
-            if ar.assignments is not None:
-                f = ar.assignments.rename(f"{algo_name}_role").reset_index()
-                f.columns = ["ritsid", f"{algo_name}_role"]
-                frames.append(f)
-        if frames:
-            assign_df = frames[0]
-            for f in frames[1:]:
-                assign_df = assign_df.merge(f, on="ritsid", how="outer")
+        search = st.text_input("🔍 Search by ritsid", key="assign_search")
 
-            search = st.text_input("🔍 Search by ritsid", key="assign_search")
+        # Primary role table (1:1) — one column per algorithm
+        primary_frames = []
+        for algo_name, ar in result.algorithm_results.items():
+            if ar.assignments is not None and not ar.assignments.empty:
+                f = ar.assignments[["ritsid", "role_id"]].rename(
+                    columns={"role_id": f"{algo_name}_primary_role"})
+                primary_frames.append(f)
+        if primary_frames:
+            primary_df = primary_frames[0]
+            for f in primary_frames[1:]:
+                primary_df = primary_df.merge(f, on="ritsid", how="outer")
             if search:
-                assign_df = assign_df[assign_df["ritsid"].str.contains(search, case=False, na=False)]
-            st.dataframe(assign_df, use_container_width=True, hide_index=True)
-        else:
+                primary_df = primary_df[primary_df["ritsid"].str.contains(search, case=False, na=False)]
+            st.subheader("Primary Role (1 per user)")
+            st.dataframe(primary_df, use_container_width=True, hide_index=True)
+
+        # Memberships table (1:N) — long format, one row per (user, role)
+        mem_frames = []
+        for algo_name, ar in result.algorithm_results.items():
+            src = ar.memberships if ar.memberships is not None else ar.assignments
+            if src is not None and not src.empty:
+                f = src[["ritsid", "role_id"]].copy()
+                f["algorithm"] = algo_name
+                mem_frames.append(f)
+        if mem_frames:
+            mem_df = pd.concat(mem_frames, ignore_index=True)[["ritsid", "algorithm", "role_id"]]
+            if search:
+                mem_df = mem_df[mem_df["ritsid"].str.contains(search, case=False, na=False)]
+            n_multi = (mem_df.groupby(["ritsid", "algorithm"]).size() > 1).sum()
+            st.subheader(f"All Role Memberships ({n_multi:,} users with multiple roles)")
+            st.dataframe(mem_df, use_container_width=True, hide_index=True)
+
+        if not primary_frames and not mem_frames:
             st.info("No assignment data available.")
 
     # ── Tab 4: Top Tranids ─────────────────────────────────────────────────────
@@ -488,5 +519,7 @@ else:
         with col2:
             for algo_name, ar in result.algorithm_results.items():
                 st.caption(f"**{algo_name.upper()}**")
-                _download_btn(ar.profiles,      f"Role Profiles",           f"{algo_name}_profiles.csv")
-                _download_btn(ar.biz_hierarchy, f"Business Role Hierarchy", f"{algo_name}_biz_hierarchy.csv")
+                _download_btn(ar.profiles,          f"Role Profiles",           f"{algo_name}_profiles.csv")
+                _download_btn(ar.biz_hierarchy,     f"Business Role Hierarchy", f"{algo_name}_biz_hierarchy.csv")
+                _download_btn(ar.unassigned_users,  f"Unassigned Users",        f"{algo_name}_unassigned_users.csv")
+                _download_btn(ar.orphan_grants,     f"Orphan Grants",           f"{algo_name}_orphan_grants.csv")
