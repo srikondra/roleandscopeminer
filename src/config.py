@@ -43,6 +43,32 @@ class NMFConfig(BaseModel):
                     "Set to 0.0 to assign every component; the dominant component is always assigned.")
 
 
+class AppRoleConfig(BaseModel):
+    """Phase B & D: CSIID-scoped app-role discovery settings."""
+    # Phase B — exact-match fingerprinting
+    enabled:                bool = Field(True,
+        description="Run app-role discovery before clustering")
+    min_users_per_pattern:  int  = Field(3, gt=0,
+        description="Minimum users sharing an identical grant pattern to form an app role")
+    max_grants_exact_match: int  = Field(50, gt=0,
+        description="CSIIDs with more distinct grants than this use Phase D fuzzy discovery")
+
+    # Phase D — fuzzy discovery for large CSIIDs (> max_grants_exact_match)
+    phase_d_enabled:           bool        = Field(True,
+        description="Run Phase D fuzzy matching for large CSIIDs")
+    phase_d_tier_thresholds:   list[float] = Field(
+        default_factory=lambda: [0.70, 0.40, 0.20],
+        description="Phase D.1 cumulative prevalence tier thresholds (descending). "
+                    "Each threshold adds grants ≥ that prevalence to the tier's grant set.")
+    phase_d_min_tier_coverage: float       = Field(0.60, ge=0.0, le=1.0,
+        description="Phase D.1 minimum fraction of a tier's grants a user must hold "
+                    "to be assigned to that tier")
+    phase_d_max_k:             int         = Field(8, gt=1,
+        description="Phase D.2 upper bound on k for k-means auto-k elbow selection")
+    phase_d_min_cluster_size:  int         = Field(5, gt=0,
+        description="Phase D minimum users required per fuzzy app_role (D.1 and D.2)")
+
+
 class HierarchyConfig(BaseModel):
     """Role hierarchy tier discovery settings."""
     # Tier 1 — Staff root
@@ -194,6 +220,7 @@ class PipelineConfig(BaseModel):
     louvain:           LouvainConfig    = Field(default_factory=LouvainConfig)
     leiden:            LeidenConfig     = Field(default_factory=LeidenConfig)
     nmf:               NMFConfig        = Field(default_factory=NMFConfig)
+    app_role:          AppRoleConfig    = Field(default_factory=AppRoleConfig)
     population_filter: PopulationFilter = Field(default_factory=PopulationFilter)
 
     # ── Algorithm selection ───────────────────────────────────────────────────
@@ -223,6 +250,16 @@ class PipelineConfig(BaseModel):
 # ── Result dataclasses ─────────────────────────────────────────────────────────
 # Using dataclasses (not Pydantic) because they hold numpy/pandas objects
 # that Pydantic cannot serialise natively.
+
+@dataclass
+class AppRoleResult:
+    """Output of AppRoleDiscovery (Phase B)."""
+    app_role_profiles:    pd.DataFrame  # (app_role_id, csiid, user_count, grant_count, grant_ids)
+    user_app_assignments: pd.DataFrame  # (ritsid, csiid, app_role_id)
+    partial_users:        pd.DataFrame  # users with no app_role match
+    app_role_matrix:      csr_matrix    # users × (app_roles + residual raw grants)
+    app_role_index:       list[str]     # column names for app_role_matrix
+
 
 @dataclass
 class TierResult:
@@ -258,6 +295,7 @@ class PipelineResult:
     """Aggregated output of the full pipeline run."""
     algorithm_results: dict[str, AlgorithmResult] = field(default_factory=dict)
     tier_result:       Optional[TierResult]        = None
+    app_role_result:   Optional[AppRoleResult]     = None
     top_tranids:       Optional[pd.DataFrame]      = None
     df:                Optional[pd.DataFrame]      = None   # merged entitlement+HR frame
     matrix:            Optional[csr_matrix]        = None

@@ -32,6 +32,7 @@ from .data import DataLoader, build_user_entitlement_matrix, top_tranid_by_popul
 from .hierarchy import TierDiscovery, BusinessRoleHierarchy
 from .algorithms.registry import AlgorithmRegistry
 from .analysis import RoleProfiler, build_app_scope_summary
+from .app_roles import AppRoleDiscovery
 
 log = logging.getLogger("role_miner.pipeline")
 
@@ -84,6 +85,16 @@ class PipelineRunner:
         result.tier_result  = tier_result
         cluster_matrix      = tier_result.residual_matrix
         cluster_grant_index = tier_result.residual_grant_index
+
+        # ── 5b. App-role discovery (Phase B) ──────────────────────────────────
+        if cfg.app_role.enabled:
+            _p("Discovering app roles (Phase B) …", 0.25)
+            ar_result = AppRoleDiscovery(cfg).discover(
+                cluster_matrix, user_index, cluster_grant_index
+            )
+            result.app_role_result  = ar_result
+            cluster_matrix          = ar_result.app_role_matrix
+            cluster_grant_index     = ar_result.app_role_index
 
         # ── 6. Algorithms ──────────────────────────────────────────────────────
         enabled   = cfg.enabled_algorithms
@@ -166,6 +177,13 @@ class PipelineRunner:
                 p = out / f"{name}_{ts}.csv"
                 df.to_csv(p, index=False)
                 log.info("  Saved %-55s (%d rows)", str(p.name), len(df))
+
+        # App-role discovery (Phase B)
+        if result.app_role_result:
+            ar = result.app_role_result
+            _save(ar.app_role_profiles,    "app_role_profiles")
+            _save(ar.user_app_assignments, "app_role_user_assignments")
+            _save(ar.partial_users,        "app_role_partial_users")
 
         # Tier hierarchy
         if result.tier_result:

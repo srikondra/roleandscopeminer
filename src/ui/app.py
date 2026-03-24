@@ -17,6 +17,7 @@ import streamlit as st
 
 from src.algorithms.registry import AlgorithmRegistry
 from src.config import (
+    AppRoleConfig,
     HierarchyConfig, LeidenConfig, LouvainConfig, NMFConfig,
     PipelineConfig, PipelineResult, PopulationFilter,
 )
@@ -404,6 +405,27 @@ with st.container(border=True):
                 orphan_grant_max_role_prevalence=orphan_thresh,
             ))
 
+        # ── Phase B — App-Role Discovery ───────────────────────────────────────
+        st.markdown("---")
+        with st.expander("🔬 Phase B — App-Role Discovery", expanded=False):
+            ar_enabled = st.checkbox(
+                "Enable CSIID-aware app-role discovery",
+                value=True, key="ar_enabled",
+                help="Groups grants by application (CSIID) into app-role bundles "
+                     "before clustering. Gives algorithms semantic features instead of raw grants.",
+            )
+            ar_c1, ar_c2 = st.columns(2)
+            ar_min_users = ar_c1.number_input(
+                "Min users per pattern", min_value=2, value=3, step=1, key="ar_min",
+                help="Patterns shared by fewer users remain as raw grants",
+                disabled=not ar_enabled,
+            )
+            ar_max_grants = ar_c2.number_input(
+                "Max grants for exact match", min_value=5, value=50, step=5, key="ar_max",
+                help="CSIIDs with more distinct grants than this are skipped (Phase D)",
+                disabled=not ar_enabled,
+            )
+
     with run_col:
         st.markdown("<div style='height:2.8rem'></div>", unsafe_allow_html=True)
         run_ready = df_raw is not None and bool(enabled_algos)
@@ -435,6 +457,11 @@ if run_btn and run_ready:
         louvain=algo_configs.get("louvain", LouvainConfig()),
         leiden=algo_configs.get("leiden", LeidenConfig()),
         nmf=algo_configs.get("nmf", NMFConfig()),
+        app_role=AppRoleConfig(
+            enabled=st.session_state.get("ar_enabled", True),
+            min_users_per_pattern=int(st.session_state.get("ar_min", 3)),
+            max_grants_exact_match=int(st.session_state.get("ar_max", 50)),
+        ),
     )
 
     progress_bar = st.progress(0.0, text="Starting …")
@@ -570,38 +597,69 @@ elif result is not None:
         else:
             st.info("No top-tranid data.")
 
-    # ── Tab 5: App Scope (Phase A) ────────────────────────────────────────────
+    # ── Tab 5: App Scope ──────────────────────────────────────────────────────
     with tabs[4]:
+
+        # ── Phase B results ───────────────────────────────────────────────────
+        ar_res = result.app_role_result
+        if ar_res is not None and not ar_res.app_role_profiles.empty:
+            st.subheader("Phase B — App-Role Discovery")
+            p_profiles = ar_res.app_role_profiles
+
+            pb1, pb2, pb3, pb4 = st.columns(4)
+            pb1.metric("App Roles found",   f"{len(p_profiles):,}")
+            pb2.metric("CSIIDs processed",  f"{p_profiles['csiid'].nunique():,}")
+            pb3.metric("Partial users",     f"{len(ar_res.partial_users):,}",
+                       help="Users with no app-role match — only raw grants remain")
+            pb4.metric("Compressed features",
+                       f"{len(ar_res.app_role_index):,}",
+                       help="App-role columns + residual raw grant columns passed to algorithms")
+
+            b_filt_csiid = st.selectbox(
+                "Filter by CSIID", ["(all)"] + sorted(p_profiles["csiid"].unique().tolist()),
+                key="b_filt_csiid",
+            )
+            b_view = (
+                p_profiles if b_filt_csiid == "(all)"
+                else p_profiles[p_profiles["csiid"] == b_filt_csiid]
+            )
+            st.dataframe(b_view, use_container_width=True, hide_index=True)
+        elif ar_res is None:
+            st.info("Phase B disabled — enable in Fine Tune Knobs to see app-role bundles.")
+
+        st.divider()
+
+        # ── Phase A results (per algorithm) ───────────────────────────────────
+        st.subheader("Phase A — Role × App Breakdown")
         has_scope = any(
             ar.app_scope_summary is not None and not ar.app_scope_summary.empty
             for ar in result.algorithm_results.values()
         )
         if not has_scope:
-            st.info("No app-scope data available.")
+            st.info("No per-role app-scope data available.")
         else:
             for algo_name, ar in result.algorithm_results.items():
                 if ar.app_scope_summary is None or ar.app_scope_summary.empty:
                     continue
 
                 scope_df = ar.app_scope_summary
-                n_role_csiid_pairs = len(scope_df)
-                n_multi_app_roles  = (
-                    scope_df.groupby("cluster_id")["csiid"].nunique() > 1
-                ).sum()
+                n_multi  = (scope_df.groupby("cluster_id")["csiid"].nunique() > 1).sum()
 
-                st.subheader(f"{algo_name.upper()}")
+                st.markdown(f"**{algo_name.upper()}**")
                 ma, mb, mc = st.columns(3)
-                ma.metric("Role × App pairs",   f"{n_role_csiid_pairs:,}")
-                mb.metric("Multi-app roles",    f"{n_multi_app_roles:,}",
-                          help="Roles whose members span more than one CSIID")
-                mc.metric("Unique CSIIDs",
-                          f"{scope_df['csiid'].nunique():,}")
+                ma.metric("Role × App pairs", f"{len(scope_df):,}")
+                mb.metric("Multi-app roles",  f"{n_multi:,}",
+                          help="Roles spanning >1 CSIID — Phase B target list")
+                mc.metric("Unique CSIIDs",    f"{scope_df['csiid'].nunique():,}")
 
                 all_roles = ["(all)"] + sorted(scope_df["cluster_id"].unique().tolist())
                 sel_role  = st.selectbox(
                     "Filter by role", all_roles, key=f"scope_role_{algo_name}"
                 )
-                view = scope_df if sel_role == "(all)" else scope_df[scope_df["cluster_id"] == sel_role]
+                view = (
+                    scope_df if sel_role == "(all)"
+                    else scope_df[scope_df["cluster_id"] == sel_role]
+                )
                 st.dataframe(view, use_container_width=True, hide_index=True)
 
     # ── Tab 6: Downloads ──────────────────────────────────────────────────────
