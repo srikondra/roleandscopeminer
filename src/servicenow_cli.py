@@ -17,14 +17,35 @@ from pathlib import Path
 
 import pandas as pd
 import requests
-import urllib3
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+def _make_session() -> requests.Session:
+    session = requests.Session()
+    retry = Retry(
+        total=3,
+        connect=3,
+        backoff_factor=0.5,
+        status_forcelist=[500, 502, 503, 504],
+        allowed_methods=["POST"],
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+SESSION = _make_session()
 
 # ── Apigee config ─────────────────────────────────────────────────────────────
 APIGEE_GRAPHQL_URL = "https://api.dummy-corp.com/servicenow/v1/graphql"
 APIGEE_CLIENT_ID     = "dummyClientId_abc123"
 APIGEE_CLIENT_SECRET = "dummyClientSecret_xyz789"
+
+# Path to corporate CA bundle (.pem). Set to True to use system default,
+# or False to disable verification (not recommended).
+SSL_CERT_PATH = "certs/corporate-ca-bundle.pem"
 
 PAGE_SIZE       = 100
 MAX_WORKERS     = 20
@@ -34,7 +55,7 @@ ROUTINE_PATTERN = re.compile(r"daily|weekly\s+checkouts?", re.IGNORECASE)
 
 # ── API ───────────────────────────────────────────────────────────────────────
 def graphql_request(query: str) -> dict:
-    response = requests.post(
+    response = SESSION.post(
         APIGEE_GRAPHQL_URL,
         json={"query": query},
         headers={
@@ -44,7 +65,7 @@ def graphql_request(query: str) -> dict:
             "X-IBM-Client-Secret": APIGEE_CLIENT_SECRET,
         },
         timeout=30,
-        verify=False,
+        verify=SSL_CERT_PATH,
     )
     response.raise_for_status()
     payload = response.json()
