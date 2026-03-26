@@ -12,7 +12,7 @@ import argparse
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -79,13 +79,13 @@ def graphql_request(query: str) -> dict:
     return payload["data"]
 
 
-def build_query(start: date, end: date, page: int = 1, size: int = PAGE_SIZE) -> str:
+def build_query(start_dt: datetime, end_dt: datetime, page: int = 1, size: int = PAGE_SIZE) -> str:
     return f"""query GetIncidents {{
   incidents(
     filter: {{
       createdTimestamp: {{
-        greaterThenEqualTo: "{start.isoformat()}T00:00:00Z"
-        lessthanEqualTo: "{end.isoformat()}T23:59:59Z"
+        greaterThenEqualTo: "{start_dt.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+        lessthanEqualTo: "{end_dt.strftime('%Y-%m-%dT%H:%M:%SZ')}"
       }}
     }}
     page: {page}
@@ -127,11 +127,21 @@ def _flatten_interactions(df: pd.DataFrame) -> pd.DataFrame:
     return df.drop(columns=["interactionRelations"])
 
 
-def fetch_day(day: date) -> list[dict]:
-    records = graphql_request(build_query(day, day, page=1))["incidents"]
+def _time_slots(start: date, end: date):
+    day = start
+    while day <= end:
+        base = datetime(day.year, day.month, day.day)
+        yield base,                              base.replace(hour=7,  minute=59, second=59)
+        yield base.replace(hour=8),              base.replace(hour=15, minute=59, second=59)
+        yield base.replace(hour=16),             base.replace(hour=23, minute=59, second=59)
+        day += timedelta(days=1)
+
+
+def fetch_slot(start_dt: datetime, end_dt: datetime) -> list[dict]:
+    records = graphql_request(build_query(start_dt, end_dt, page=1))["incidents"]
     page = 2
     while len(records) % PAGE_SIZE == 0 and records:
-        more = graphql_request(build_query(day, day, page=page))["incidents"]
+        more = graphql_request(build_query(start_dt, end_dt, page=page))["incidents"]
         records.extend(more)
         if len(more) < PAGE_SIZE:
             break
@@ -140,20 +150,20 @@ def fetch_day(day: date) -> list[dict]:
 
 
 def fetch_all_incidents(start: date, end: date) -> tuple[pd.DataFrame, int]:
-    days = [start + timedelta(days=i) for i in range((end - start).days + 1)]
-    print(f"Fetching {len(days)} days ({start} → {end}) with up to {MAX_WORKERS} parallel workers...")
+    slots = list(_time_slots(start, end))
+    print(f"Fetching {len(slots)} 8-hr slots ({start} → {end}) with up to {MAX_WORKERS} parallel workers...")
 
     all_records: list[dict] = []
-    with ThreadPoolExecutor(max_workers=min(len(days), MAX_WORKERS)) as ex:
-        futures = {ex.submit(fetch_day, day): day for day in days}
+    with ThreadPoolExecutor(max_workers=min(len(slots), MAX_WORKERS)) as ex:
+        futures = {ex.submit(fetch_slot, s, e): (s, e) for s, e in slots}
         for i, fut in enumerate(as_completed(futures), 1):
-            day = futures[fut]
+            s, e = futures[fut]
             try:
                 records = fut.result()
                 all_records.extend(records)
-                print(f"  [{i}/{len(days)}] {day}: {len(records)} records")
-            except Exception as e:
-                print(f"  [{i}/{len(days)}] {day}: ERROR — {e}", file=sys.stderr)
+                print(f"  [{i}/{len(slots)}] {s.strftime('%Y-%m-%d %H:%M')}–{e.strftime('%H:%M')}: {len(records)} records")
+            except Exception as ex_err:
+                print(f"  [{i}/{len(slots)}] {s}: ERROR — {ex_err}", file=sys.stderr)
 
     total = len(all_records)
     if not all_records:
@@ -170,7 +180,8 @@ def classify_buckets(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["bucket"] = "Other"
     df.loc[df["shortDescription"].str.contains(ROUTINE_PATTERN, na=False), "bucket"] = "B3: Routine"
-    df.loc[df["createdByGeid"] == df["assignedToGeid"],                     "bucket"] = "B1: Self-Assigned"
+    df.loc[(df["createdByGeid"] == df["assignedToGeid"]) &
+           (df["createdByGeid"] == df["callerGeid"]),                       "bucket"] = "B1: Self-Assigned"
     df.loc[df["createdByGeid"] == REST_USER_GEID,                           "bucket"] = "B2: Rest User"
     return df
 
