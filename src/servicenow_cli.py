@@ -33,6 +33,8 @@ def _make_session() -> requests.Session:
     adapter = HTTPAdapter(max_retries=retry)
     session.mount("https://", adapter)
     session.mount("http://", adapter)
+    session.verify = SSL_CA_BUNDLE
+    session.cert   = (SSL_CLIENT_CERT, SSL_CLIENT_KEY)
     return session
 
 
@@ -43,9 +45,13 @@ APIGEE_GRAPHQL_URL = "https://api.dummy-corp.com/servicenow/v1/graphql"
 APIGEE_CLIENT_ID     = "dummyClientId_abc123"
 APIGEE_CLIENT_SECRET = "dummyClientSecret_xyz789"
 
-# Path to corporate CA bundle (.pem). Set to True to use system default,
-# or False to disable verification (not recommended).
-SSL_CERT_PATH = "certs/corporate-ca-bundle.pem"
+# Server verification: path to corporate CA bundle (.pem)
+SSL_CA_BUNDLE = "certs/corporate-ca-bundle.pem"
+
+# Client certificate for mutual TLS (mTLS) — required by this Apigee instance.
+# Ask your infra/security team for these files.
+SSL_CLIENT_CERT = "certs/client.crt"   # client certificate
+SSL_CLIENT_KEY  = "certs/client.key"   # private key (no passphrase)
 
 PAGE_SIZE       = 100
 MAX_WORKERS     = 20
@@ -65,7 +71,6 @@ def graphql_request(query: str) -> dict:
             "X-IBM-Client-Secret": APIGEE_CLIENT_SECRET,
         },
         timeout=30,
-        verify=SSL_CERT_PATH,
     )
     response.raise_for_status()
     payload = response.json()
@@ -96,8 +101,30 @@ def build_query(start: date, end: date, page: int = 1, size: int = PAGE_SIZE) ->
     originatingGroupName
     assignmentGroupName
     createdTimestamp
+    interactionRelations {{
+      id
+      interaction {{
+        number
+        type
+        workNotes
+      }}
+    }}
   }}
 }}"""
+
+
+def _flatten_interactions(df: pd.DataFrame) -> pd.DataFrame:
+    def extract(relations):
+        if not relations:
+            return None, None, None
+        interaction = (relations[0] or {}).get("interaction") or {}
+        return interaction.get("number"), interaction.get("type"), interaction.get("workNotes")
+
+    df = df.copy()
+    df[["interaction_number", "interaction_type", "interaction_workNotes"]] = df["interactionRelations"].apply(
+        lambda r: pd.Series(extract(r))
+    )
+    return df.drop(columns=["interactionRelations"])
 
 
 def fetch_day(day: date) -> list[dict]:
@@ -135,6 +162,7 @@ def fetch_all_incidents(start: date, end: date) -> tuple[pd.DataFrame, int]:
     df = pd.DataFrame(all_records)
     df["createdTimestamp"] = pd.to_datetime(df["createdTimestamp"])
     df = df.sort_values("createdTimestamp").reset_index(drop=True)
+    df = _flatten_interactions(df)
     return df, total
 
 

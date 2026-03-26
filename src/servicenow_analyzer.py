@@ -80,8 +80,27 @@ def build_query(start: date, end: date, page: int = 1, size: int = PAGE_SIZE) ->
     originatingGroupName
     assignmentGroupName
     createdTimestamp
+    interactionRelations {
+        id
+        interaction {
+            number
+            type
+            workNotes
+        }
+    }
   }}
 }}"""
+
+
+def classify_buckets(df: pd.DataFrame) -> pd.DataFrame:
+    """Assign each incident to exactly one bucket (priority: B2 > B1 > B3)."""
+    df = df.copy()
+    df["bucket"] = "Other"
+    # Apply lowest priority first; higher priority overwrites
+    df.loc[df["shortDescription"].str.contains(ROUTINE_PATTERN, na=False), "bucket"] = "B3: Routine"
+    df.loc[df["createdByGeid"] == df["assignedToGeid"],                     "bucket"] = "B1: Self-Assigned"
+    df.loc[df["createdByGeid"] == REST_USER_GEID,                           "bucket"] = "B2: Rest User"
+    return df
 
 
 def fetch_day(day: date) -> list[dict]:
@@ -95,17 +114,6 @@ def fetch_day(day: date) -> list[dict]:
             break
         page += 1
     return records
-
-
-def classify_buckets(df: pd.DataFrame) -> pd.DataFrame:
-    """Assign each incident to exactly one bucket (priority: B2 > B1 > B3)."""
-    df = df.copy()
-    df["bucket"] = "Other"
-    # Apply lowest priority first; higher priority overwrites
-    df.loc[df["shortDescription"].str.contains(ROUTINE_PATTERN, na=False), "bucket"] = "B3: Routine"
-    df.loc[df["createdByGeid"] == df["assignedToGeid"],                     "bucket"] = "B1: Self-Assigned"
-    df.loc[df["createdByGeid"] == REST_USER_GEID,                           "bucket"] = "B2: Rest User"
-    return df
 
 
 def fetch_all_incidents(start: date, end: date) -> tuple[pd.DataFrame, int]:
