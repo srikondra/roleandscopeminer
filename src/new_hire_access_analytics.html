@@ -1,0 +1,1198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>New Hire Access Analytics</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#f1f5f9;--surface:#fff;--border:#e2e8f0;
+  --primary:#2563eb;--primary-light:#dbeafe;
+  --red:#ef4444;--red-light:#fee2e2;
+  --amber:#d97706;--amber-light:#fef3c7;
+  --green:#059669;--green-light:#d1fae5;
+  --purple:#7c3aed;--purple-light:#ede9fe;
+  --text:#1e293b;--muted:#64748b;--subtle:#94a3b8;
+}
+body{font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);font-size:13px;line-height:1.5}
+.hdr{background:linear-gradient(135deg,#1e3a8a,#2563eb);color:#fff;padding:14px 24px;display:flex;justify-content:space-between;align-items:center;box-shadow:0 2px 8px rgba(0,0,0,.2)}
+.hdr h1{font-size:17px;font-weight:700}
+.hdr p{font-size:11px;opacity:.75;margin-top:2px}
+.hdr-pills{display:flex;gap:8px;flex-wrap:wrap}
+.hdr-pill{background:rgba(255,255,255,.15);padding:3px 10px;border-radius:999px;font-size:11px;cursor:default}
+.hdr-pill.warn{background:rgba(245,158,11,.4)}
+.main{padding:14px 20px;max-width:1440px;margin:0 auto}
+
+/* PANELS */
+.panel{background:var(--surface);border:1px solid var(--border);border-radius:10px;margin-bottom:10px;overflow:hidden}
+.panel-hdr{padding:11px 16px;display:flex;justify-content:space-between;align-items:center;cursor:pointer;user-select:none;font-weight:700;font-size:12px;gap:8px;background:#fafbfc}
+.panel-hdr:hover{background:#f1f5f9}
+.panel-chevron{font-size:10px;color:var(--muted)}
+.panel-body{border-top:1px solid var(--border);padding:16px}
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.grid-auto{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:14px}
+
+/* FORM ELEMENTS */
+.s-item>label{display:block;font-size:10px;color:var(--muted);font-weight:700;margin-bottom:5px;text-transform:uppercase;letter-spacing:.4px}
+.s-val{color:var(--primary);font-weight:700;margin-left:5px}
+input[type=range]{width:100%;accent-color:var(--primary);margin-top:3px}
+input[type=number],input[type=text],select,textarea{width:100%;border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:12px;background:#fff;color:var(--text);font-family:inherit}
+input:focus,select:focus,textarea:focus{outline:2px solid var(--primary-light);border-color:var(--primary)}
+textarea{resize:vertical;font-size:11px;font-family:monospace;min-height:80px}
+.s-hint{font-size:10px;color:var(--subtle);margin-top:4px}
+.tgl{display:flex;align-items:center;gap:8px;margin-top:4px;cursor:pointer}
+.tgl-sw{width:38px;height:21px;background:#cbd5e1;border-radius:999px;position:relative;transition:background .2s;flex-shrink:0}
+.tgl-sw.on{background:var(--primary)}
+.tgl-k{width:17px;height:17px;background:#fff;border-radius:50%;position:absolute;top:2px;left:2px;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,.2)}
+.tgl-sw.on .tgl-k{left:19px}
+
+/* FILTER BAR */
+.fbar{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 16px;margin-bottom:10px;display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end}
+.fg{display:flex;flex-direction:column;gap:3px}
+.fg>label{font-size:10px;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.4px}
+.fg>select,.fg>input{min-width:120px;border:1px solid var(--border);border-radius:6px;padding:5px 8px;font-size:12px;background:#fff}
+.filter-row-label{width:100%;font-size:10px;font-weight:700;color:var(--primary);text-transform:uppercase;letter-spacing:.5px;padding:4px 0 0;border-top:1px solid var(--border);margin-top:4px}
+.filter-row-label:first-child{border-top:none;margin-top:0;padding-top:0}
+.fbar-divider{width:100%;border-top:1px solid var(--border);margin:4px 0}
+.btn{padding:5px 14px;border:1px solid var(--border);border-radius:6px;background:#fff;cursor:pointer;font-size:12px;color:var(--muted);transition:all .15s}
+.btn:hover{border-color:var(--primary);color:var(--primary)}
+.btn.primary{background:var(--primary);color:#fff;border-color:var(--primary)}
+.btn.primary:hover{background:#1d4ed8}
+
+/* KPI */
+.kpi-row{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:10px}
+.kpi{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px;border-top:3px solid var(--border)}
+.kpi.red{border-top-color:var(--red)}.kpi.amber{border-top-color:var(--amber)}
+.kpi.blue{border-top-color:var(--primary)}.kpi.green{border-top-color:var(--green)}
+.kpi.purple{border-top-color:var(--purple)}
+.kpi-lbl{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;font-weight:700}
+.kpi-val{font-size:26px;font-weight:800;margin:3px 0 2px;letter-spacing:-1px}
+.kpi.red .kpi-val{color:var(--red)}.kpi.amber .kpi-val{color:var(--amber)}
+.kpi.blue .kpi-val{color:var(--primary)}.kpi.green .kpi-val{color:var(--green)}
+.kpi.purple .kpi-val{color:var(--purple)}
+.kpi-sub{font-size:10px;color:var(--muted)}
+
+/* CHARTS */
+.charts-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}
+.chart-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px}
+.chart-card h3{font-size:12px;font-weight:700;margin-bottom:10px}
+.chart-wrap{height:210px;position:relative}
+
+/* TABLE */
+.tbl-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;margin-bottom:16px}
+.tbl-top{padding:10px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
+.tbl-top h3{font-size:12px;font-weight:700}
+table{width:100%;border-collapse:collapse}
+th{background:#f8fafc;padding:8px 12px;text-align:left;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;font-weight:700;border-bottom:1px solid var(--border);cursor:pointer;white-space:nowrap;user-select:none}
+th:hover{color:var(--primary)}
+th.sasc::after{content:' ↑'}th.sdesc::after{content:' ↓'}
+td{padding:8px 12px;border-bottom:1px solid #f1f5f9;vertical-align:middle}
+tr:last-child>td{border-bottom:none}
+tr.erow>td{background:#f8fafc}
+tr.drow>td{padding:0;background:#f8fafc;border-bottom:1px solid var(--border)}
+tbody tr:not(.drow):hover>td{background:#fafbfc}
+
+/* BADGES */
+.badge{display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:999px;font-size:10px;font-weight:700;white-space:nowrap}
+.badge.rev{background:var(--primary-light);color:#1d4ed8}
+.badge.cost{background:#f1f5f9;color:#475569}
+.badge.rejected{background:var(--red-light);color:#b91c1c}
+.badge.completed{background:var(--green-light);color:#065f46}
+.badge.pending{background:var(--amber-light);color:#92400e}
+
+/* IMPACT COLORS */
+.c-red{color:var(--red);font-weight:700}.c-amber{color:var(--amber);font-weight:700}.c-green{color:var(--green);font-weight:700}
+
+/* EXPAND */
+.xbtn{background:none;border:1px solid var(--border);border-radius:4px;padding:2px 7px;cursor:pointer;font-size:11px;color:var(--muted);transition:all .15s}
+.xbtn:hover{background:var(--primary-light);border-color:var(--primary);color:var(--primary)}
+
+/* TIMELINE */
+.tl-wrap{padding:12px 16px}
+.tl-legend{display:flex;gap:14px;margin-bottom:8px;flex-wrap:wrap;font-size:10px;color:var(--muted)}
+.tl-leg-item{display:flex;align-items:center;gap:4px}
+.tl-dot{width:10px;height:10px;border-radius:2px;flex-shrink:0}
+.cl-strip{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
+.cl-chip{background:#f1f5f9;border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:10px}
+.cl-chip strong{display:block;color:var(--text);font-size:11px;margin-bottom:2px}
+
+/* IMPORT */
+.import-notice{background:var(--amber-light);border:1px solid #f59e0b;border-radius:8px;padding:10px 14px;margin-bottom:10px;font-size:12px;color:#78350f;display:flex;align-items:center;gap:8px}
+
+/* DATA MODE TABS */
+.mode-tabs{display:flex;gap:8px;margin-bottom:10px}
+.mode-tab{padding:6px 16px;border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:12px;background:#fff;font-weight:500;color:var(--muted)}
+.mode-tab.active{background:var(--primary);color:#fff;border-color:var(--primary)}
+
+@keyframes spin{to{transform:rotate(360deg)}}
+/* RESPONSIVE */
+@media(max-width:900px){.kpi-row{grid-template-columns:1fr 1fr}.charts-row{grid-template-columns:1fr}.grid-2{grid-template-columns:1fr}}
+@media(max-width:600px){.kpi-row{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<div class="hdr">
+  <div>
+    <h1>🔑 New Hire Access Analytics</h1>
+    <p>Productivity &amp; Revenue Impact from Delayed Tool Access · First 90 Days</p>
+  </div>
+  <div class="hdr-pills">
+    <span class="hdr-pill" id="hdr-mode">📊 Demo Data</span>
+    <span class="hdr-pill" id="hdr-emp">— employees</span>
+    <span class="hdr-pill" id="hdr-req">— requests</span>
+  </div>
+</div>
+
+<div class="main">
+
+  <!-- ── DATA SOURCE ── -->
+  <div class="panel" id="panel-data">
+    <div class="panel-hdr" onclick="togglePanel('data')">
+      <span>📂 Data Source</span>
+      <span class="panel-chevron" id="data-chevron">▼ expand to load your data</span>
+    </div>
+    <div class="panel-body" id="data-body" style="display:none">
+      <div class="mode-tabs">
+        <div class="mode-tab active" onclick="setMode('demo')" id="tab-demo">📊 Demo Data</div>
+        <div class="mode-tab" onclick="setMode('csv')" id="tab-csv">📋 Paste CSV</div>
+      </div>
+
+      <!-- CSV IMPORT MODE -->
+      <div id="csv-import" style="display:none">
+        <p style="font-size:11px;color:var(--muted);margin-bottom:12px">
+          Paste your CSV data below. Headers must match the schema exactly (case-insensitive).
+          Revenue generators are identified by org-l5 values you specify below.
+        </p>
+        <div class="grid-2" style="gap:14px;margin-bottom:14px">
+          <div class="s-item">
+            <label>Employee CSV</label>
+            <div class="s-hint" style="margin-bottom:4px">Required columns: userid, empid, firstname, lastname, dept, hiredate, jobfunction, org-l5, salary (optional)</div>
+            <textarea id="emp-csv" placeholder="userid,empid,firstname,lastname,dept,hiredate,org-l1,org-l2,org-l3,org-l4,org-l5,org-l6,org-l7,org-l8,title,c_level,expense_code,fte,manager,jobcode,jobdescription,jobfamily,jobfunction,workcountry,region,salary"></textarea>
+          </div>
+          <div class="s-item">
+            <label>Access Requests CSV</label>
+            <div class="s-hint" style="margin-bottom:4px">Required: userid, requestid, product, productname, request_time, completion_time, status, daysfromhiringdate</div>
+            <textarea id="req-csv" placeholder="userid,empid,hiredate,requestid,product,productname,request_time,completion_time,status,daysfromhiringdate"></textarea>
+          </div>
+        </div>
+        <div class="s-item" style="margin-bottom:14px">
+          <label>Revenue-Generating org-l5 Node Values <span style="font-weight:400;color:var(--muted)">(comma-separated, case-insensitive)</span></label>
+          <input type="text" id="rev-nodes" placeholder="e.g.  Sales Americas, Trading EMEA, Institutional Sales, Prime Brokerage" value="">
+          <div class="s-hint">Leave blank to use Department-level mapping instead (configure below)</div>
+        </div>
+        <div class="s-item" style="margin-bottom:14px">
+          <label>Revenue-Generating Departments (fallback if org-l5 not set)</label>
+          <input type="text" id="rev-depts" placeholder="e.g.  Sales, Trading, Equities" value="Sales, Trading">
+        </div>
+        <button class="btn primary" onclick="loadCSV()">Load &amp; Analyze</button>
+        <span id="csv-status" style="margin-left:12px;font-size:12px;color:var(--muted)"></span>
+      </div>
+
+      <!-- DEMO NOTE -->
+      <div id="demo-note">
+        <div class="import-notice">
+          ⚠️ Currently showing <strong>synthetic demo data</strong> (75 employees, ~450 requests) that matches your schema.
+          Switch to "Paste CSV" tab to load your real data.
+        </div>
+        <div class="s-item">
+          <label>Revenue-Generating org-l5 Nodes in Demo</label>
+          <input type="text" id="demo-rev-nodes" value="Sales Americas, Sales EMEA, Sales APAC, Institutional Trading, Rates Trading, FX Trading, Equity Trading" style="font-size:11px" onchange="recompute()">
+          <div class="s-hint">Edit to adjust which org-l5 nodes are considered revenue-generating in the demo</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── ANALYSIS SETTINGS ── -->
+  <div class="panel" id="panel-settings">
+    <div class="panel-hdr" onclick="togglePanel('settings')">
+      <span>⚙️ Analysis Settings</span>
+      <span class="panel-chevron" id="settings-chevron">▼ expand</span>
+    </div>
+    <div class="panel-body" id="settings-body" style="display:none">
+      <div class="grid-auto">
+        <div class="s-item">
+          <label>Fold-Down Threshold <span class="s-val" id="sv-fold">30 days</span></label>
+          <input type="range" id="sl-fold" min="7" max="60" value="30" oninput="onSlider('fold')">
+          <div class="s-hint">Clusters starting within this window → treated as Day 1 access need</div>
+        </div>
+        <div class="s-item">
+          <label>Cluster Gap <span class="s-val" id="sv-gap">7 days</span></label>
+          <input type="range" id="sl-gap" min="2" max="21" value="7" oninput="onSlider('gap')">
+          <div class="s-hint">Max silence between requests to belong to same cluster</div>
+        </div>
+        <div class="s-item">
+          <label>Global Impairment Override <span class="s-val" id="sv-imp">Per-Tool</span></label>
+          <input type="range" id="sl-imp" min="0" max="100" value="0" oninput="onSlider('imp')">
+          <div class="s-hint">0 = use per-tool default (50%); set to override all tools uniformly</div>
+        </div>
+        <div class="s-item">
+          <label>Default Annual Revenue Target</label>
+          <input type="number" id="inp-rev" value="1000000" step="50000" min="100000" onchange="recompute()">
+          <div class="s-hint">Used when employee has no individual target on file</div>
+        </div>
+        <div class="s-item">
+          <label>Salary Burden Rate</label>
+          <input type="number" id="inp-burden" value="1.3" step="0.05" min="1.0" max="2.5" onchange="recompute()">
+          <div class="s-hint">Loaded cost multiplier on salary (e.g. 1.3 = +30% for benefits/overhead)</div>
+        </div>
+        <div class="s-item">
+          <label>Default Annual Salary (if not in data)</label>
+          <input type="number" id="inp-salary" value="100000" step="5000" min="30000" onchange="recompute()">
+        </div>
+        <div class="s-item">
+          <label>Productivity Ramp Curve</label>
+          <div class="tgl" onclick="toggleRamp()">
+            <div class="tgl-sw on" id="tgl-ramp"><div class="tgl-k"></div></div>
+            <span id="tgl-ramp-lbl" style="font-size:11px">ON — weights impact by new hire ramp</span>
+          </div>
+          <div class="s-hint">Day 1–7: 15% · 8–14: 30% · 15–30: 55% · 31–60: 80% · 61–90: 95%</div>
+        </div>
+        <div class="s-item">
+          <label>Count Rejected/Cancelled Requests</label>
+          <div class="tgl" onclick="toggleRejected()">
+            <div class="tgl-sw on" id="tgl-rej"><div class="tgl-k"></div></div>
+            <span id="tgl-rej-lbl" style="font-size:11px">ON — blocked access counts to day 90</span>
+          </div>
+          <div class="s-hint">Rejected = permanently blocked; impact runs entire 90-day window</div>
+        </div>
+      </div>
+
+      <!-- ── C-LEVEL SALARY BANDS ── -->
+      <div class="comp-section">
+        <div class="comp-section-hdr">
+          💰 Salary Bands by C-Level
+          <span style="font-weight:400;color:var(--muted);font-size:10px">· Used when employee salary is not in data · C1 = most senior</span>
+        </div>
+        <div id="clevel-grid" class="comp-grid"></div>
+      </div>
+
+      <!-- ── REGION / COUNTRY MULTIPLIERS ── -->
+      <div class="comp-section">
+        <div class="comp-section-hdr">
+          🌍 Regional Salary Multipliers
+          <span style="font-weight:400;color:var(--muted);font-size:10px">· Adjusts salary/revenue target by geography · Country overrides Region when both set</span>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+          <div>
+            <div style="font-size:10px;font-weight:700;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.4px">By Region</div>
+            <div id="region-grid" class="comp-grid"></div>
+          </div>
+          <div>
+            <div style="font-size:10px;font-weight:700;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.4px">By Country <span style="font-weight:400">(overrides region)</span></div>
+            <div id="country-grid" class="comp-grid"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── FILTERS ── -->
+  <div class="fbar">
+    <!-- Row 1: Org hierarchy -->
+    <div class="filter-row-label">Org Hierarchy</div>
+    <div class="fg"><label>org-l2</label><select id="f-l2" onchange="onOrgFilter('l2')"><option value="">All</option></select></div>
+    <div class="fg"><label>org-l3</label><select id="f-l3" onchange="onOrgFilter('l3')"><option value="">All</option></select></div>
+    <div class="fg"><label>org-l4</label><select id="f-l4" onchange="onOrgFilter('l4')"><option value="">All</option></select></div>
+    <div class="fg"><label>org-l5 (Rev flag)</label><select id="f-l5" onchange="onOrgFilter('l5')"><option value="">All</option></select></div>
+    <div class="fg"><label>org-l6</label><select id="f-l6" onchange="onOrgFilter('l6')"><option value="">All</option></select></div>
+    <div class="fbar-divider"></div>
+    <!-- Row 2: Other filters -->
+    <div class="fg"><label>Department</label><select id="f-dept" onchange="applyFilters()"><option value="">All Depts</option></select></div>
+    <div class="fg"><label>Role Type</label>
+      <select id="f-role" onchange="applyFilters()">
+        <option value="">All</option><option value="revenue">Revenue Generator</option><option value="cost">Cost Center</option>
+      </select>
+    </div>
+    <div class="fg"><label>Hire Quarter</label><select id="f-qtr" onchange="applyFilters()"><option value="">All Quarters</option></select></div>
+    <div class="fg"><label>Min Impact ($)</label>
+      <select id="f-impact" onchange="applyFilters()">
+        <option value="0">Any</option><option value="5000">&gt; $5K</option>
+        <option value="25000">&gt; $25K</option><option value="100000">&gt; $100K</option><option value="500000">&gt; $500K</option>
+      </select>
+    </div>
+    <div class="fg"><label>Request Status</label>
+      <select id="f-status" onchange="applyFilters()">
+        <option value="">All</option><option value="has-rejected">Has Rejected/Cancelled</option>
+        <option value="fully-granted">Fully Granted</option><option value="has-pending">Has Pending</option>
+      </select>
+    </div>
+    <div class="fg"><label>Search</label>
+      <input type="text" id="f-search" placeholder="Name, product, org…" oninput="debouncedFilter()" style="min-width:150px">
+    </div>
+    <button class="btn" onclick="resetFilters()">↺ Reset</button>
+  </div>
+
+  <!-- ── KPI CARDS ── -->
+  <div class="kpi-row">
+    <div class="kpi red"><div class="kpi-lbl">Revenue at Risk</div><div class="kpi-val" id="kpi-rev">—</div><div class="kpi-sub" id="kpi-rev-sub">Revenue generators</div></div>
+    <div class="kpi amber"><div class="kpi-lbl">Productivity Cost</div><div class="kpi-val" id="kpi-cost">—</div><div class="kpi-sub" id="kpi-cost-sub">Cost center employees</div></div>
+    <div class="kpi blue"><div class="kpi-lbl">Avg Phantom Days</div><div class="kpi-val" id="kpi-phantom">—</div><div class="kpi-sub">Unrecognized access gap per employee</div></div>
+    <div class="kpi purple"><div class="kpi-lbl">Rejected/Blocked Requests</div><div class="kpi-val" id="kpi-rej">—</div><div class="kpi-sub" id="kpi-rej-sub">Never granted access</div></div>
+  </div>
+
+  <!-- ── CHARTS ── -->
+  <div class="charts-row">
+    <div class="chart-card"><h3>📊 Total Impact by Department</h3><div class="chart-wrap"><canvas id="dept-chart"></canvas></div></div>
+    <div class="chart-card"><h3>🔧 Products by Avg Total Delay (Phantom + Pending days)</h3><div class="chart-wrap"><canvas id="tool-chart"></canvas></div></div>
+  </div>
+
+  <!-- ── EMPLOYEE TABLE ── -->
+  <div class="tbl-card">
+    <div class="tbl-top">
+      <h3>👥 Employee Detail &nbsp;<span style="color:var(--muted);font-weight:400" id="tbl-count"></span></h3>
+      <span style="font-size:11px;color:var(--muted)">Click column header to sort · ▶ to expand timeline</span>
+    </div>
+    <div style="overflow-x:auto">
+      <table>
+        <thead>
+          <tr>
+            <th style="width:32px"></th>
+            <th onclick="sortBy('name')">Name</th>
+            <th onclick="sortBy('dept')">Dept</th>
+            <th onclick="sortBy('orgl5')">org-l5</th>
+            <th onclick="sortBy('role')">Role</th>
+            <th onclick="sortBy('hireDate')">Hire Date</th>
+            <th onclick="sortBy('clusters')" title="Detected request clusters">Clusters</th>
+            <th onclick="sortBy('phantomDays')" title="Days need existed before request was raised">Phantom Days</th>
+            <th onclick="sortBy('pendingDays')" title="Days waiting for approval after requesting">Pending Days</th>
+            <th onclick="sortBy('rejected')" title="Requests rejected or cancelled">Rejected/Cancelled</th>
+            <th onclick="sortBy('impact')" title="Revenue at Risk or Productivity Cost">Impact $</th>
+            <th onclick="sortBy('worstProd')" title="Product with longest total gap">Worst Product</th>
+          </tr>
+        </thead>
+        <tbody id="tbl-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+</div><!-- /main -->
+
+<script>
+// ═══════════════════════════════════════════════════════════
+// STATE
+// ═══════════════════════════════════════════════════════════
+let settings = {
+  foldDownDays: 30, clusterGapDays: 7, globalImpairment: null,
+  defaultRevenue: 1_000_000, burdenRate: 1.3, defaultSalary: 100_000,
+  useRamp: true, countRejected: true
+};
+let sortCol='impact', sortDir='desc';
+let expandedRows=new Set();
+let allEmployees=[], computedEmployees=[], filteredEmployees=[];
+let deptChart=null, toolChart=null;
+let dataMode='demo';
+let currentPage=1, rowsPerPage=50;
+let _searchTimer=null;
+let revOrgL5Nodes=new Set(['sales americas','sales emea','sales apac','institutional trading','rates trading','fx trading','equity trading']);
+let revDepts=new Set(['sales','trading']);
+
+// ═══════════════════════════════════════════════════════════
+// SYNTHETIC DATA — mirrors actual schema
+// ═══════════════════════════════════════════════════════════
+const DEPT_PRODUCTS={
+  Sales:       ['CRM-Salesforce','ZoomInfo-SI','DocuSign','Seismic-CMS','Clari-RevOps','Gong-CallIntel'],
+  Trading:     ['Bloomberg-Terminal','Fidessa-OMS','Murex-TMS','FactSet-Analytics','Refinitiv-Eikon','ICE-Connect'],
+  Technology:  ['GitHub-Enterprise','AWS-Console','Jira-PM','Confluence-Wiki','Artifactory','SonarQube'],
+  Risk:        ['Axioma-RiskModel','MSCI-RiskMetrics','Riskonnect-GRC','Tableau-Risk','SAS-Analytics'],
+  Compliance:  ['Actimize-AML','ComplySci-RegTech','Relativity-eDiscovery','DocuVault','PolicyIQ'],
+  Operations:  ['ServiceNow-ITSM','Coupa-Procurement','SAP-Concur','Workday-Ops','MuleSoft-API'],
+  HR:          ['Workday-HCM','ADP-Payroll','Benefitfocus','Taleo-ATS','Cornerstone-LMS'],
+  Finance:     ['SAP-S4HANA','Hyperion-EPM','Kyriba-Treasury','Blackline-Acctg','Anaplan-FP&A']
+};
+const COMMON_PRODUCTS=['Office365-Email','GlobalProtect-VPN','Slack-Collab','Okta-SSO','ServiceNow-Portal','Concur-Expense'];
+
+const PROD_IMP={
+  'Office365-Email':0.58,'GlobalProtect-VPN':0.72,'Slack-Collab':0.38,'Okta-SSO':0.65,'ServiceNow-Portal':0.20,'Concur-Expense':0.10,
+  'CRM-Salesforce':0.85,'ZoomInfo-SI':0.50,'DocuSign':0.55,'Seismic-CMS':0.40,'Clari-RevOps':0.45,'Gong-CallIntel':0.38,
+  'Bloomberg-Terminal':0.95,'Fidessa-OMS':0.90,'Murex-TMS':0.88,'FactSet-Analytics':0.70,'Refinitiv-Eikon':0.82,'ICE-Connect':0.78,
+  'GitHub-Enterprise':0.78,'AWS-Console':0.72,'Jira-PM':0.48,'Confluence-Wiki':0.30,'Artifactory':0.62,'SonarQube':0.45,
+  'Axioma-RiskModel':0.80,'MSCI-RiskMetrics':0.75,'Riskonnect-GRC':0.65,'Tableau-Risk':0.52,'SAS-Analytics':0.60,
+  'Actimize-AML':0.75,'ComplySci-RegTech':0.70,'Relativity-eDiscovery':0.55,'DocuVault':0.45,'PolicyIQ':0.40,
+  'ServiceNow-ITSM':0.68,'Coupa-Procurement':0.55,'SAP-Concur':0.50,'Workday-Ops':0.60,'MuleSoft-API':0.65,
+  'Workday-HCM':0.60,'ADP-Payroll':0.50,'Benefitfocus':0.28,'Taleo-ATS':0.55,'Cornerstone-LMS':0.42,
+  'SAP-S4HANA':0.75,'Hyperion-EPM':0.68,'Kyriba-Treasury':0.78,'Blackline-Acctg':0.65,'Anaplan-FP&A':0.60
+};
+
+// Full org hierarchy per department: l2 → l3 → l4 → [l5 options] → [l6 options]
+const ORG_HIER={
+  Sales:{
+    l2:'Revenue',l3:'Sales & Distribution',l4:'Client Coverage',
+    l5:['Sales Americas','Sales EMEA','Sales APAC','Insurance Sales','Wealth Sales'],
+    l6:['Institutional Clients','Corporate Clients','Retail Accounts','Emerging Markets','Key Accounts']
+  },
+  Trading:{
+    l2:'Revenue',l3:'Markets',l4:'Trading Desks',
+    l5:['Institutional Trading','Rates Trading','FX Trading','Equity Trading','Commodities Trading'],
+    l6:['Flow Trading','Structured Products','Electronic Trading','Derivatives','Prime Services']
+  },
+  Technology:{
+    l2:'Corporate Functions',l3:'Technology & Innovation',l4:'Tech Delivery',
+    l5:['Enterprise IT','Software Delivery','Data Engineering','Infrastructure','Cybersecurity'],
+    l6:['Platform Engineering','Cloud Services','DevSecOps','Data Products','Integration']
+  },
+  Risk:{
+    l2:'Control Functions',l3:'Risk Management',l4:'Risk Oversight',
+    l5:['Market Risk','Credit Risk','Operational Risk','Model Risk'],
+    l6:['Risk Analytics','Stress Testing','Risk Reporting','Counterparty Risk','Limit Monitoring']
+  },
+  Compliance:{
+    l2:'Control Functions',l3:'Legal & Compliance',l4:'Compliance Programs',
+    l5:['Regulatory Affairs','AML Compliance','Trade Surveillance','Legal Entity'],
+    l6:['Policy & Procedures','Regulatory Reporting','Surveillance Analytics','Advisory Services']
+  },
+  Operations:{
+    l2:'Corporate Functions',l3:'Operations',l4:'Business Operations',
+    l5:['Trade Operations','Fund Administration','Client Onboarding','Settlements'],
+    l6:['Middle Office','Back Office','Reconciliation','Client Services','Process Automation']
+  },
+  HR:{
+    l2:'Corporate Functions',l3:'Human Resources',l4:'People & Culture',
+    l5:['Talent Acquisition','HR Business Partners','Compensation & Benefits','L&D'],
+    l6:['Recruiting Ops','HR Technology','Rewards','Learning Programs']
+  },
+  Finance:{
+    l2:'Corporate Functions',l3:'Finance',l4:'Financial Management',
+    l5:['FP&A','Corporate Treasury','Financial Reporting','Accounts & Control'],
+    l6:['Budgeting','Cash Management','External Reporting','Management Accounting']
+  }
+};
+
+function mkRng(seed){let s=seed>>>0;return()=>{s=(Math.imul(1664525,s)+1013904223)>>>0;return s/4294967296}}
+const GR=mkRng(42);
+function ri(a,b,r=GR){return Math.floor(r()*(b-a+1))+a}
+function rc(a,r=GR){return a[Math.floor(r()*a.length)]}
+function rs(a,n,r=GR){return [...a].sort(()=>r()-.5).slice(0,n)}
+
+const FN=['James','Sarah','Michael','Emily','Robert','Jennifer','David','Lisa','John','Amanda','William','Jessica','Richard','Ashley','Thomas','Rachel','Kevin','Lauren','Mark','Stephanie','Daniel','Paul','Samantha','Andrew','Nicole','Kenneth','Joshua','Brian','Ryan','Jacob','Jason','Matthew','Timothy','Jose','Christopher','Michelle','Kimberly','Donna','Carol','Sandra'];
+const LN=['Smith','Johnson','Williams','Brown','Jones','Garcia','Miller','Davis','Rodriguez','Martinez','Hernandez','Lopez','Wilson','Anderson','Thomas','Taylor','Moore','Jackson','Martin','Lee','Perez','Thompson','White','Harris','Clark','Ramirez','Lewis','Robinson','Walker','Young','Allen','King','Wright','Scott','Torres','Nguyen','Hill','Flores','Green','Adams'];
+
+function addDays(d,n){const r=new Date(d);r.setDate(r.getDate()+n);return r}
+function fmtD(d){return d.toISOString().split('T')[0]}
+function fmtDT(d){return d.toISOString().replace('T',' ').slice(0,19)}
+function fmtQ(d){return`Q${Math.floor(d.getMonth()/3)+1} ${d.getFullYear()}`}
+function daysBetween(a,b){return Math.round((new Date(b)-new Date(a))/(1000*86400))}
+
+const STATUSES=['completed','completed','completed','completed','approved','created','rejected','cancelled'];
+
+function generateSynthetic(){
+  const deptCounts={Sales:15,Trading:10,Technology:12,Risk:8,Compliance:6,Operations:10,HR:7,Finance:7};
+  const used=new Set();
+  const emps=[];
+  let uid=1000, eid=1;
+
+  for(const [dept,cnt] of Object.entries(deptCounts)){
+    const lr=mkRng(eid*997+dept.charCodeAt(0)*13);
+    const lri=(a,b)=>ri(a,b,lr);
+    const lrc=a=>rc(a,lr);
+    const lrs=(a,n)=>rs(a,n,lr);
+
+    for(let i=0;i<cnt;i++){
+      let name,att=0;
+      do{name=`${lrc(FN)} ${lrc(LN)}`;att++}while(used.has(name)&&att<50);
+      used.add(name);
+      const [fn,ln]=name.split(' ');
+
+      const isRev=['Sales','Trading'].includes(dept);
+      const hireDate=addDays(new Date('2025-01-06'),lri(0,358));
+      const hier=ORG_HIER[dept]||{l2:'Corporate Functions',l3:dept,l4:dept+' Group',l5:[dept],l6:['General']};
+      const orgL5=lrc(hier.l5);
+      const orgL6=lrc(hier.l6);
+      const salary=dept==='Trading'?lri(150,300)*1000:dept==='Sales'?lri(80,160)*1000:dept==='Technology'?lri(90,180)*1000:lri(65,130)*1000;
+      const revTarget=isRev?(dept==='Trading'?lri(1,8)*1e6:lri(400,2000)*1000):0;
+      const dTools=DEPT_PRODUCTS[dept]||[];
+
+      const requests=[];
+      const makeReq=(product,wave_start_day,grantDelayBase)=>{
+        const requestDay=Math.min(wave_start_day,89);
+        const grantDelay=lr()>0.8?grantDelayBase+lri(10,22):grantDelayBase;
+        const rawStatus=lrc(STATUSES);
+        const status=rawStatus;
+        const requestTime=addDays(hireDate,requestDay);
+        let completionTime=null;
+        if(status==='completed') completionTime=addDays(requestTime,grantDelay);
+        else if(status==='approved') completionTime=addDays(requestTime,grantDelay+lri(3,8));
+        return{
+          userid:`U${uid}`,empid:`E${String(eid).padStart(5,'0')}`,hiredate:fmtD(hireDate),
+          requestid:`REQ-${uid}-${requests.length+1}`,
+          product,productname:product.replace(/-/g,' '),
+          request_time:fmtDT(requestTime),
+          completion_time:completionTime?fmtDT(completionTime):null,
+          status,daysfromhiringdate:requestDay,
+          _impairment:PROD_IMP[product]||0.5
+        };
+      };
+
+      // Wave 1: days 1-6
+      lrs(COMMON_PRODUCTS,lri(2,4)).forEach((p,ti)=>requests.push(makeReq(p,lri(1,4)+ti,lri(1,8))));
+      if(lr()>0.4) requests.push(makeReq(lrc(dTools),lri(3,6),lri(2,10)));
+      // Wave 2: days 12-25
+      const w2s=lri(12,25);
+      lrs(dTools,lri(2,Math.min(4,dTools.length))).forEach((p,ti)=>requests.push(makeReq(p,w2s+ti,lri(3,14))));
+      // Wave 3: days 35-52 (~65%)
+      if(lr()>0.35){const w3s=lri(35,52);lrs(dTools,lri(1,3)).forEach((p,ti)=>requests.push(makeReq(p,w3s+ti*2,lri(2,16))));}
+      // Wave 4: days 62-80 (~40%)
+      if(lr()>0.60){const w4s=lri(62,80);lrs([...dTools,...COMMON_PRODUCTS],lri(1,2)).forEach((p,ti)=>requests.push(makeReq(p,w4s+ti,lri(2,10))));}
+
+      emps.push({
+        userid:`U${uid++}`,empid:`E${String(eid).padStart(5,'0')}`,
+        firstname:fn,lastname:ln,name,
+        dept,department:dept,
+        title:isRev?`${dept} Associate`:`${dept} Analyst`,
+        'org-l1':'Global Enterprise','org-l2':hier.l2,'org-l3':hier.l3,'org-l4':hier.l4,'org-l5':orgL5,'org-l6':orgL6,
+        hiredate:fmtD(hireDate),hireDate,hireQ:fmtQ(hireDate),
+        salary,revTarget,isRevenueGenerator:isRev,
+        jobfunction:dept==='Sales'?'Sales':dept==='Trading'?'Trading':'Support',
+        requests,eid:eid++
+      });
+    }
+  }
+  return emps;
+}
+
+// ═══════════════════════════════════════════════════════════
+// CSV PARSER
+// ═══════════════════════════════════════════════════════════
+function parseCSV(text){
+  const lines=text.trim().split('\n').filter(l=>l.trim());
+  if(lines.length<2) return[];
+  const hdrs=lines[0].split(',').map(h=>h.trim().toLowerCase().replace(/['"]/g,''));
+  return lines.slice(1).map(line=>{
+    const vals=line.split(',').map(v=>v.trim().replace(/^["']|["']$/g,''));
+    const obj={};
+    hdrs.forEach((h,i)=>obj[h]=vals[i]||'');
+    return obj;
+  });
+}
+
+function loadCSV(){
+  const empText=document.getElementById('emp-csv').value;
+  const reqText=document.getElementById('req-csv').value;
+  if(!empText||!reqText){document.getElementById('csv-status').textContent='⚠ Both CSVs required';return;}
+
+  // Parse rev nodes/depts
+  const nodesInput=document.getElementById('rev-nodes').value;
+  const deptsInput=document.getElementById('rev-depts').value;
+  revOrgL5Nodes=new Set(nodesInput.split(',').map(s=>s.trim().toLowerCase()).filter(Boolean));
+  revDepts=new Set(deptsInput.split(',').map(s=>s.trim().toLowerCase()).filter(Boolean));
+
+  const empRows=parseCSV(empText);
+  const reqRows=parseCSV(reqText);
+
+  // Build request map by userid
+  const reqMap={};
+  reqRows.forEach(r=>{
+    const uid=r.userid||r.empid;
+    if(!reqMap[uid]) reqMap[uid]=[];
+    reqMap[uid].push({
+      userid:r.userid,empid:r.empid,hiredate:r.hiredate,
+      requestid:r.requestid,product:r.product,productname:r.productname,
+      request_time:r.request_time,completion_time:r.completion_time||null,
+      status:r.status,daysfromhiringdate:parseInt(r.daysfromhiringdate)||0,
+      _impairment:PROD_IMP[r.product]||0.5
+    });
+  });
+
+  allEmployees=empRows.map((e,i)=>{
+    const uid=e.userid||e.empid;
+    const hireDate=e.hiredate?new Date(e.hiredate):new Date();
+    // Support both 'org-l5' and 'orgl5' header variants
+    const getOrg=lv=>e[`org-${lv}`]||e[`org${lv}`]||e[`orgl${lv.slice(1)}`]||'';
+    const orgL5=getOrg('l5').toLowerCase();
+    const dept=(e.dept||e.department||'Unknown');
+    const isRev=revOrgL5Nodes.size>0
+      ?revOrgL5Nodes.has(orgL5)
+      :revDepts.has(dept.toLowerCase());
+    const salary=parseFloat(e.salary)||settings.defaultSalary;
+    const revTarget=parseFloat(e.revtarget||e.rev_target||0)||0;
+    return{
+      userid:uid,empid:e.empid||uid,
+      firstname:e.firstname||'',lastname:e.lastname||'',
+      name:`${e.firstname||''} ${e.lastname||''}`.trim()||uid,
+      dept,department:dept,
+      title:e.title||'',
+      'org-l1':getOrg('l1'),'org-l2':getOrg('l2'),'org-l3':getOrg('l3'),
+      'org-l4':getOrg('l4'),'org-l5':getOrg('l5'),'org-l6':getOrg('l6'),
+      'org-l7':getOrg('l7'),'org-l8':getOrg('l8'),
+      hiredate:e.hiredate,hireDate,hireQ:fmtQ(hireDate),
+      salary,revTarget,isRevenueGenerator:isRev,
+      jobfunction:e.jobfunction||'',
+      requests:reqMap[uid]||[],eid:i
+    };
+  });
+
+  dataMode='csv';
+  document.getElementById('hdr-mode').textContent='📋 Real Data';
+  document.getElementById('csv-status').textContent=`✓ Loaded ${allEmployees.length} employees, ${reqRows.length} requests`;
+  showLoading(`Analyzing ${allEmployees.length.toLocaleString()} employees · ${reqRows.length.toLocaleString()} requests…`);
+  setTimeout(()=>{rebuildUI();computeAll();applyFilters();hideLoading();},30);
+}
+
+// ═══════════════════════════════════════════════════════════
+// BUSINESS LOGIC
+// ═══════════════════════════════════════════════════════════
+function ramp(day){
+  if(day<=7)return 0.15;if(day<=14)return 0.30;
+  if(day<=30)return 0.55;if(day<=60)return 0.80;
+  if(day<=90)return 0.95;return 1.0;
+}
+
+function detectClusters(requests,gapDays){
+  if(!requests.length)return[];
+  const sorted=[...requests].sort((a,b)=>a.daysfromhiringdate-b.daysfromhiringdate);
+  const cls=[];
+  let cur={startDay:sorted[0].daysfromhiringdate,endDay:sorted[0].daysfromhiringdate,reqs:[sorted[0]]};
+  for(let i=1;i<sorted.length;i++){
+    const r=sorted[i];
+    if(r.daysfromhiringdate-cur.endDay<=gapDays){cur.endDay=r.daysfromhiringdate;cur.reqs.push(r);}
+    else{cls.push(cur);cur={startDay:r.daysfromhiringdate,endDay:r.daysfromhiringdate,reqs:[r]};}
+  }
+  cls.push(cur);return cls;
+}
+
+function computeEmployee(emp){
+  const clusters=detectClusters(emp.requests,settings.clusterGapDays);
+  const fdt=settings.foldDownDays;
+
+  // Assign needStartDay per cluster
+  let prevEnd=0;
+  const enriched=clusters.map(cl=>{
+    let needStartDay=cl.startDay<=fdt?1:Math.max(fdt,prevEnd)+1;
+    prevEnd=cl.endDay;
+    return{...cl,needStartDay};
+  });
+
+  // Build need periods per request
+  const needs=[];
+  let rejCount=0;
+  enriched.forEach(cl=>{
+    cl.reqs.forEach(req=>{
+      const reqDay=req.daysfromhiringdate;
+      let grantDay;
+      const st=(req.status||'').toLowerCase();
+      if(st==='completed'&&req.completion_time){
+        grantDay=Math.min(reqDay+daysBetween(req.request_time,req.completion_time),95);
+      }else if(st==='approved'&&req.completion_time){
+        grantDay=Math.min(reqDay+daysBetween(req.request_time,req.completion_time)+lriLocal(2,7),95);
+      }else if((st==='rejected'||st==='cancelled')&&settings.countRejected){
+        rejCount++;grantDay=91;// never granted in window
+      }else if(st==='created'||st==='approved'){
+        grantDay=90;// still pending
+      }else{
+        grantDay=reqDay+5;// fallback
+      }
+      needs.push({product:req.product||req.productname,impairment:req._impairment||0.5,
+        needStartDay:cl.needStartDay,requestDay:reqDay,grantDay,status:st,requestTime:req.request_time});
+    });
+  });
+
+  function lriLocal(a,b){return Math.floor(Math.random()*(b-a+1))+a;}
+
+  // Daily impact — O(m×gap) bucket approach instead of O(m²) filter-per-day
+  const dailyVal=emp.isRevenueGenerator
+    ?(emp.revTarget||settings.defaultRevenue)/260
+    :(emp.salary||settings.defaultSalary)*settings.burdenRate/260;
+
+  // Pre-fill day buckets in a single pass over needs
+  const dayRawImp=new Float32Array(92); // index = day (1-90)
+  const dayPhantom=new Uint8Array(92);
+  const dayPending=new Uint8Array(92);
+  needs.forEach(n=>{
+    const start=Math.max(1,n.needStartDay);
+    const end=Math.min(91,n.grantDay);
+    for(let d=start;d<end;d++){
+      dayRawImp[d]+=n.impairment;
+      if(n.requestDay>d) dayPhantom[d]=1;
+      else dayPending[d]=1;
+    }
+  });
+
+  let totalImpact=0,totalPhantom=0,totalPending=0;
+  for(let day=1;day<=90;day++){
+    if(!dayRawImp[day]) continue;
+    const imp=settings.globalImpairment!==null?settings.globalImpairment:Math.min(1,dayRawImp[day]);
+    const r=settings.useRamp?ramp(day):1.0;
+    totalImpact+=dailyVal*imp*r;
+    if(dayPhantom[day]) totalPhantom++;
+    if(dayPending[day]) totalPending++;
+  }
+
+  // Per-product stats
+  const prodStats={};
+  needs.forEach(n=>{
+    if(!prodStats[n.product])prodStats[n.product]={phantom:0,pending:0,total:0,status:n.status};
+    const ps=Math.max(0,n.requestDay-n.needStartDay);
+    const pd=n.grantDay-n.requestDay;
+    prodStats[n.product].phantom=Math.max(prodStats[n.product].phantom,ps);
+    prodStats[n.product].pending=Math.max(prodStats[n.product].pending,pd);
+    prodStats[n.product].total=prodStats[n.product].phantom+prodStats[n.product].pending;
+    if(n.status==='rejected'||n.status==='cancelled')prodStats[n.product].status='rejected';
+  });
+  const pe=Object.entries(prodStats).sort((a,b)=>b[1].total-a[1].total);
+  const worstProd=pe[0]?{name:pe[0][0],...pe[0][1]}:null;
+
+  const rejectedReqs=emp.requests.filter(r=>{const s=(r.status||'').toLowerCase();return s==='rejected'||s==='cancelled';}).length;
+
+  return{...emp,clusters:enriched,needs,totalImpact,totalPhantomDays:totalPhantom,
+    totalPendingDays:totalPending,clusterCount:enriched.length,worstProd,prodStats,rejectedReqs};
+}
+
+function computeAll(){computedEmployees=allEmployees.map(computeEmployee);}
+
+// ═══════════════════════════════════════════════════════════
+// CHARTS
+// ═══════════════════════════════════════════════════════════
+function buildDeptChart(emps){
+  const depts=[...new Set(emps.map(e=>e.department))].sort();
+  const revD=depts.map(d=>emps.filter(e=>e.department===d&&e.isRevenueGenerator).reduce((s,e)=>s+e.totalImpact,0));
+  const costD=depts.map(d=>emps.filter(e=>e.department===d&&!e.isRevenueGenerator).reduce((s,e)=>s+e.totalImpact,0));
+  const ctx=document.getElementById('dept-chart').getContext('2d');
+  if(deptChart)deptChart.destroy();
+  deptChart=new Chart(ctx,{type:'bar',data:{labels:depts,datasets:[
+    {label:'Revenue at Risk',data:revD,backgroundColor:'rgba(239,68,68,.72)',borderColor:'rgba(239,68,68,1)',borderWidth:1},
+    {label:'Productivity Cost',data:costD,backgroundColor:'rgba(217,119,6,.65)',borderColor:'rgba(217,119,6,1)',borderWidth:1}
+  ]},options:{responsive:true,maintainAspectRatio:false,
+    plugins:{legend:{labels:{font:{size:10},boxWidth:10}},tooltip:{callbacks:{label:c=>`${c.dataset.label}: ${fmtDollar(c.parsed.y)}`}}},
+    scales:{x:{stacked:true,ticks:{font:{size:10}}},y:{stacked:true,ticks:{callback:v=>fmtDollarS(v),font:{size:10}}}}}});
+}
+
+function buildToolChart(emps){
+  const pt={};
+  emps.forEach(e=>{Object.entries(e.prodStats||{}).forEach(([p,s])=>{
+    if(!pt[p]){pt[p]={sum:0,cnt:0};}pt[p].sum+=s.total;pt[p].cnt++;
+  });});
+  const sorted=Object.entries(pt).map(([p,v])=>({p,avg:v.sum/v.cnt,cnt:v.cnt}))
+    .sort((a,b)=>b.avg-a.avg).slice(0,12);
+  const ctx=document.getElementById('tool-chart').getContext('2d');
+  if(toolChart)toolChart.destroy();
+  toolChart=new Chart(ctx,{type:'bar',data:{labels:sorted.map(s=>s.p),datasets:[{
+    label:'Avg Total Delay (days)',data:sorted.map(s=>+s.avg.toFixed(1)),
+    backgroundColor:sorted.map(s=>s.avg>20?'rgba(239,68,68,.72)':s.avg>10?'rgba(217,119,6,.7)':'rgba(5,150,105,.65)'),
+    borderWidth:0,borderRadius:3}]},
+    options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>`Avg ${c.parsed.x}d · ${sorted[c.dataIndex].cnt} employees`}}},
+      scales:{x:{ticks:{font:{size:10}}},y:{ticks:{font:{size:10}}}}}});
+}
+
+// ═══════════════════════════════════════════════════════════
+// KPIs
+// ═══════════════════════════════════════════════════════════
+function renderKPIs(emps){
+  const rev=emps.filter(e=>e.isRevenueGenerator);
+  const cost=emps.filter(e=>!e.isRevenueGenerator);
+  const totalRev=rev.reduce((s,e)=>s+e.totalImpact,0);
+  const totalCost=cost.reduce((s,e)=>s+e.totalImpact,0);
+  const avgPhantom=emps.length?emps.reduce((s,e)=>s+e.totalPhantomDays,0)/emps.length:0;
+  const totalRej=emps.reduce((s,e)=>s+e.rejectedReqs,0);
+  const rejEmps=emps.filter(e=>e.rejectedReqs>0).length;
+  document.getElementById('kpi-rev').textContent=fmtDollar(totalRev);
+  document.getElementById('kpi-rev-sub').textContent=`${rev.length} revenue generators`;
+  document.getElementById('kpi-cost').textContent=fmtDollar(totalCost);
+  document.getElementById('kpi-cost-sub').textContent=`${cost.length} cost center employees`;
+  document.getElementById('kpi-phantom').textContent=avgPhantom.toFixed(1)+'d';
+  document.getElementById('kpi-rej').textContent=totalRej;
+  document.getElementById('kpi-rej-sub').textContent=`Across ${rejEmps} employees`;
+  document.getElementById('hdr-emp').textContent=`${allEmployees.length} employees`;
+  document.getElementById('hdr-req').textContent=`${allEmployees.reduce((s,e)=>s+e.requests.length,0)} requests`;
+}
+
+// ═══════════════════════════════════════════════════════════
+// TABLE
+// ═══════════════════════════════════════════════════════════
+function ic(v,isRev){return isRev?(v>200000?'c-red':v>50000?'c-amber':'c-green'):(v>20000?'c-red':v>5000?'c-amber':'c-green')}
+
+function renderTable(emps){
+  const totalPages=Math.max(1,Math.ceil(emps.length/rowsPerPage));
+  if(currentPage>totalPages) currentPage=totalPages;
+  const pageEmps=emps.slice((currentPage-1)*rowsPerPage, currentPage*rowsPerPage);
+
+  document.getElementById('tbl-count').textContent=
+    `${emps.length} of ${computedEmployees.length} employees · Page ${currentPage}/${totalPages}`;
+
+  // Use DocumentFragment to minimize reflows
+  const tb=document.getElementById('tbl-body');
+  tb.innerHTML='';
+  const frag=document.createDocumentFragment();
+
+  pageEmps.forEach(emp=>{
+    const isExp=expandedRows.has(emp.userid);
+    const wp=emp.worstProd;
+    const tr=document.createElement('tr');
+    if(isExp)tr.classList.add('erow');
+    tr.innerHTML=`
+      <td><button class="xbtn" onclick="toggleRow('${emp.userid}')">${isExp?'▼':'▶'}</button></td>
+      <td><strong>${emp.name}</strong><div style="font-size:10px;color:var(--muted)">${emp.title||emp.jobfunction||''}</div></td>
+      <td>${emp.department}</td>
+      <td style="font-size:11px;color:var(--muted)">${emp['org-l5']||'—'}</td>
+      <td><span class="badge ${emp.isRevenueGenerator?'rev':'cost'}">${emp.isRevenueGenerator?'💰 Revenue':'📋 Cost'}</span></td>
+      <td>${emp.hiredate||emp.hireDateStr||'—'}</td>
+      <td style="text-align:center">${emp.clusterCount}</td>
+      <td style="text-align:center">${emp.totalPhantomDays}<span style="color:var(--muted)">d</span></td>
+      <td style="text-align:center">${emp.totalPendingDays}<span style="color:var(--muted)">d</span></td>
+      <td style="text-align:center">${emp.rejectedReqs>0?`<span class="badge rejected">${emp.rejectedReqs} blocked</span>`:'—'}</td>
+      <td class="${ic(emp.totalImpact,emp.isRevenueGenerator)}">${fmtDollar(emp.totalImpact)}</td>
+      <td style="font-size:11px">${wp?`<span title="${wp.name}: ${wp.phantom}d phantom + ${wp.pending}d pending${wp.status==='rejected'?' [BLOCKED]':''}">${wp.name}<span style="color:var(--muted)"> (${wp.total}d)</span>${wp.status==='rejected'?' 🚫':''}</span>`:'—'}</td>`;
+    frag.appendChild(tr);
+    if(isExp){
+      const dr=document.createElement('tr');dr.classList.add('drow');
+      dr.innerHTML=`<td colspan="12">${renderTimeline(emp)}</td>`;
+      frag.appendChild(dr);
+    }
+  });
+  tb.appendChild(frag);
+
+  // Pagination controls
+  renderPagination(emps.length, totalPages);
+}
+
+function renderPagination(total, totalPages){
+  let pc=document.getElementById('pagination-ctrl');
+  if(!pc){
+    pc=document.createElement('div');
+    pc.id='pagination-ctrl';
+    pc.style.cssText='display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-top:1px solid var(--border);background:#fafbfc;font-size:12px;flex-wrap:wrap;gap:8px';
+    document.querySelector('.tbl-card').appendChild(pc);
+  }
+  const start=(currentPage-1)*rowsPerPage+1;
+  const end=Math.min(currentPage*rowsPerPage,total);
+  pc.innerHTML=`
+    <span style="color:var(--muted)">Showing <strong>${start}–${end}</strong> of <strong>${total}</strong> employees</span>
+    <div style="display:flex;gap:6px;align-items:center">
+      <button class="btn" onclick="goPage(1)" ${currentPage===1?'disabled':''}>«</button>
+      <button class="btn" onclick="goPage(${currentPage-1})" ${currentPage===1?'disabled':''}>‹ Prev</button>
+      <span style="padding:5px 10px;background:#fff;border:1px solid var(--border);border-radius:6px;min-width:80px;text-align:center">
+        Page ${currentPage} / ${totalPages}
+      </span>
+      <button class="btn" onclick="goPage(${currentPage+1})" ${currentPage===totalPages?'disabled':''}>Next ›</button>
+      <button class="btn" onclick="goPage(${totalPages})" ${currentPage===totalPages?'disabled':''}>»</button>
+      <select onchange="setRowsPerPage(this.value)" style="border:1px solid var(--border);border-radius:6px;padding:5px 8px;font-size:12px">
+        ${[25,50,100,200].map(n=>`<option value="${n}" ${n===rowsPerPage?'selected':''}>${n} rows</option>`).join('')}
+      </select>
+    </div>`;
+}
+
+function goPage(p){
+  const totalPages=Math.max(1,Math.ceil(filteredEmployees.length/rowsPerPage));
+  currentPage=Math.max(1,Math.min(p,totalPages));
+  renderTable(filteredEmployees);
+  document.querySelector('.tbl-card').scrollIntoView({behavior:'smooth',block:'start'});
+}
+
+function setRowsPerPage(n){rowsPerPage=parseInt(n);currentPage=1;renderTable(filteredEmployees);}
+
+// ═══════════════════════════════════════════════════════════
+// TIMELINE
+// ═══════════════════════════════════════════════════════════
+function renderTimeline(emp){
+  const W=900,H=24,PAD=60,rows=Math.max(1,emp.clusters.length);
+  const svgH=rows*36+48;
+  function x(d){return PAD+d*(W-PAD*2)/90}
+
+  let svg='';
+  // Grid lines
+  for(let d=0;d<=90;d+=10){
+    svg+=`<line x1="${x(d)}" y1="0" x2="${x(d)}" y2="${svgH-16}" stroke="#f1f5f9" stroke-width="1"/>`;
+    svg+=`<text x="${x(d)}" y="${svgH-4}" text-anchor="middle" font-size="9" fill="#94a3b8">d${d}</text>`;
+  }
+
+  emp.clusters.forEach((cl,ci)=>{
+    const y=12+ci*36;
+    const folded=cl.startDay<=settings.foldDownDays;
+    // Phantom bar
+    if(cl.needStartDay<cl.startDay){
+      const px=x(cl.needStartDay),pw=x(cl.startDay)-x(cl.needStartDay);
+      svg+=`<rect x="${px}" y="${y}" width="${pw}" height="${H}" rx="3" fill="#fca5a5" opacity=".85"><title>Phantom: Day ${cl.needStartDay}–${cl.startDay} (${cl.startDay-cl.needStartDay}d need existed before any request)</title></rect>`;
+      if(pw>18) svg+=`<text x="${px+pw/2}" y="${y+H/2+4}" text-anchor="middle" font-size="8" fill="#b91c1c" font-weight="700">${cl.startDay-cl.needStartDay}d</text>`;
+    }
+    // Pending bars per request
+    cl.reqs.forEach(req=>{
+      const rd=req.daysfromhiringdate;
+      const gd=Math.min(emp.needs.find(n=>n.product===(req.product||req.productname)&&n.requestDay===rd)?.grantDay||rd+5,90);
+      const pw=Math.max(x(gd)-x(rd),2);
+      const rejected=(req.status||'').toLowerCase()==='rejected'||(req.status||'').toLowerCase()==='cancelled';
+      const clr=rejected?'#fee2e2':'#fcd34d';
+      const txtClr=rejected?'#b91c1c':'#92400e';
+      svg+=`<rect x="${x(rd)}" y="${y}" width="${pw}" height="${H}" rx="3" fill="${clr}" opacity=".85"><title>${req.product}: requested d${rd}, status: ${req.status}${!rejected?`, granted d${gd} (${gd-rd}d wait)`:' [BLOCKED]'}</title></rect>`;
+      if(pw>14) svg+=`<text x="${x(rd)+pw/2}" y="${y+H/2+4}" text-anchor="middle" font-size="7" fill="${txtClr}">${rejected?'🚫':`${gd-rd}d`}</text>`;
+      if(!rejected) svg+=`<circle cx="${x(gd)}" cy="${y+H/2}" r="4" fill="#059669"><title>Granted: ${req.product} on day ${gd}</title></circle>`;
+    });
+    // Cluster label
+    const lbl=`C${ci+1}${folded?' [→d1]':''}`;
+    svg+=`<text x="${PAD-5}" y="${y+H/2+4}" text-anchor="end" font-size="9" fill="${folded?'#2563eb':'#475569'}" font-weight="700">${lbl}</text>`;
+    // Tools preview
+    const toolStr=cl.reqs.map(r=>r.product||r.productname).join(', ');
+    const ts=toolStr.length>50?toolStr.slice(0,48)+'…':toolStr;
+    svg+=`<text x="${x(92)}" y="${y+H/2+4}" font-size="8" fill="#94a3b8">${ts}</text>`;
+  });
+
+  const chips=emp.clusters.map((cl,i)=>`
+    <div class="cl-chip">
+      <strong>Cluster ${i+1} ${cl.startDay<=settings.foldDownDays?'🔵 Folded':'🟡 Post-threshold'}</strong>
+      <span>Days ${cl.startDay}–${cl.endDay} · ${cl.reqs.length} product${cl.reqs.length>1?'s':''} · Phantom: ${Math.max(0,cl.startDay-cl.needStartDay)}d · Need from day ${cl.needStartDay}</span>
+    </div>`).join('');
+
+  return `<div class="tl-wrap">
+    <div class="tl-legend">
+      <span class="tl-leg-item"><span class="tl-dot" style="background:#fca5a5"></span>Phantom gap (need existed, no request yet)</span>
+      <span class="tl-leg-item"><span class="tl-dot" style="background:#fcd34d"></span>Pending (waiting for grant)</span>
+      <span class="tl-leg-item"><span class="tl-dot" style="background:#fee2e2"></span>Rejected / Cancelled</span>
+      <span class="tl-leg-item"><span class="tl-dot" style="background:#059669;border-radius:50%"></span>Granted</span>
+      <span class="tl-leg-item" style="margin-left:auto;font-size:10px;color:var(--primary)">🔵 Folded to Day 1 &nbsp;🟡 Beyond ${settings.foldDownDays}d threshold</span>
+    </div>
+    <div style="overflow-x:auto"><svg width="100%" viewBox="0 0 ${W+300} ${svgH}" xmlns="http://www.w3.org/2000/svg">${svg}</svg></div>
+    <div class="cl-strip">${chips}</div>
+    <div style="margin-top:10px;padding:8px 12px;background:#f8fafc;border-radius:6px;font-size:11px;color:var(--muted);display:flex;gap:20px;flex-wrap:wrap">
+      <span><strong style="color:var(--text)">Total Impact:</strong> ${fmtDollar(emp.totalImpact)}</span>
+      <span><strong style="color:var(--text)">Phantom:</strong> ${emp.totalPhantomDays}d</span>
+      <span><strong style="color:var(--text)">Pending:</strong> ${emp.totalPendingDays}d</span>
+      <span><strong style="color:var(--text)">Rejected/Cancelled:</strong> ${emp.rejectedReqs} requests</span>
+      <span><strong style="color:var(--text)">${emp.isRevenueGenerator?'Revenue Target':'Salary'}:</strong> ${fmtDollar(emp.isRevenueGenerator?(emp.revTarget||settings.defaultRevenue):emp.salary)}/yr</span>
+    </div>
+  </div>`;
+}
+
+// ═══════════════════════════════════════════════════════════
+// FILTERS & SORT
+// ═══════════════════════════════════════════════════════════
+function debouncedFilter(){clearTimeout(_searchTimer);_searchTimer=setTimeout(applyFilters,280);}
+
+// Cascading org filter: when a higher level changes, repopulate lower levels
+function onOrgFilter(changed){
+  const levels=['l2','l3','l4','l5','l6'];
+  const changedIdx=levels.indexOf(changed);
+  // Get current selections for all levels up to and including changed
+  const selections={};
+  levels.forEach(l=>{selections[l]=document.getElementById(`f-${l}`).value;});
+  // Repopulate downstream levels based on current filtered set
+  const upstream=computedEmployees.filter(e=>{
+    for(let i=0;i<=changedIdx;i++){
+      const lv=levels[i];
+      if(selections[lv]&&e[`org-${lv}`]!==selections[lv])return false;
+    }
+    return true;
+  });
+  for(let i=changedIdx+1;i<levels.length;i++){
+    const lv=levels[i];
+    const sel=document.getElementById(`f-${lv}`);
+    const prev=sel.value;
+    const vals=[...new Set(upstream.map(e=>e[`org-${lv}`]).filter(Boolean))].sort();
+    sel.innerHTML='<option value="">All</option>'+vals.map(v=>`<option value="${v}"${v===prev?' selected':''}>${v}</option>`).join('');
+  }
+  applyFilters();
+}
+
+function applyFilters(){
+  const dept=document.getElementById('f-dept').value;
+  const role=document.getElementById('f-role').value;
+  const l2=document.getElementById('f-l2').value;
+  const l3=document.getElementById('f-l3').value;
+  const l4=document.getElementById('f-l4').value;
+  const l5=document.getElementById('f-l5').value;
+  const l6=document.getElementById('f-l6').value;
+  const qtr=document.getElementById('f-qtr').value;
+  const minImp=parseFloat(document.getElementById('f-impact').value)||0;
+  const statusF=document.getElementById('f-status').value;
+  const search=(document.getElementById('f-search').value||'').toLowerCase();
+
+  currentPage=1;
+  filteredEmployees=computedEmployees.filter(e=>{
+    if(dept&&e.department!==dept)return false;
+    if(role==='revenue'&&!e.isRevenueGenerator)return false;
+    if(role==='cost'&&e.isRevenueGenerator)return false;
+    if(l2&&e['org-l2']!==l2)return false;
+    if(l3&&e['org-l3']!==l3)return false;
+    if(l4&&e['org-l4']!==l4)return false;
+    if(l5&&e['org-l5']!==l5)return false;
+    if(l6&&e['org-l6']!==l6)return false;
+    if(qtr&&e.hireQ!==qtr)return false;
+    if(e.totalImpact<minImp)return false;
+    if(statusF==='has-rejected'&&e.rejectedReqs===0)return false;
+    if(statusF==='fully-granted'&&e.rejectedReqs>0)return false;
+    if(statusF==='has-pending'&&e.totalPendingDays===0)return false;
+    if(search){
+      const orgStr=[e['org-l2'],e['org-l3'],e['org-l4'],e['org-l5'],e['org-l6']].filter(Boolean).join(' ').toLowerCase();
+      if(!e.name.toLowerCase().includes(search)&&
+         !e.department.toLowerCase().includes(search)&&
+         !orgStr.includes(search)&&
+         !e.requests.some(r=>(r.product||'').toLowerCase().includes(search)||(r.productname||'').toLowerCase().includes(search)))return false;
+    }
+    return true;
+  });
+  sortAndRender();
+}
+
+function sortBy(col){
+  if(sortCol===col)sortDir=sortDir==='asc'?'desc':'asc';
+  else{sortCol=col;sortDir='desc';}
+  sortAndRender();
+}
+
+function sortAndRender(){
+  const d=sortDir==='asc'?1:-1;
+  filteredEmployees.sort((a,b)=>{
+    const m={name:[a.name,b.name],dept:[a.department,b.department],orgl5:[a['org-l5'],b['org-l5']],
+      role:[+a.isRevenueGenerator,+b.isRevenueGenerator],hireDate:[a.hireDate,b.hireDate],
+      clusters:[a.clusterCount,b.clusterCount],phantomDays:[a.totalPhantomDays,b.totalPhantomDays],
+      pendingDays:[a.totalPendingDays,b.totalPendingDays],rejected:[a.rejectedReqs,b.rejectedReqs],
+      impact:[a.totalImpact,b.totalImpact],worstProd:[a.worstProd?.total||0,b.worstProd?.total||0]};
+    const [va,vb]=m[sortCol]||[0,0];
+    return(va<vb?-1:va>vb?1:0)*d;
+  });
+  document.querySelectorAll('th').forEach(t=>{t.classList.remove('sasc','sdesc')});
+  const cols=['','name','dept','orgl5','role','hireDate','clusters','phantomDays','pendingDays','rejected','impact','worstProd'];
+  const idx=cols.indexOf(sortCol);
+  if(idx>=0){const ths=document.querySelectorAll('th');if(ths[idx])ths[idx].classList.add(sortDir==='asc'?'sasc':'sdesc');}
+  renderTable(filteredEmployees);
+  renderKPIs(filteredEmployees);
+  buildDeptChart(filteredEmployees);
+  buildToolChart(filteredEmployees);
+}
+
+function resetFilters(){
+  ['f-dept','f-role','f-l2','f-l3','f-l4','f-l5','f-l6','f-qtr','f-impact','f-status'].forEach(id=>{
+    const el=document.getElementById(id);if(el)el.value='';
+  });
+  document.getElementById('f-search').value='';
+  // Repopulate all org dropdowns to full set
+  rebuildOrgDropdowns(computedEmployees);
+  applyFilters();
+}
+
+function toggleRow(uid){
+  if(expandedRows.has(uid))expandedRows.delete(uid);else expandedRows.add(uid);
+  renderTable(filteredEmployees);
+}
+
+// ═══════════════════════════════════════════════════════════
+// SETTINGS UI
+// ═══════════════════════════════════════════════════════════
+function togglePanel(id){
+  const b=document.getElementById(`${id}-body`),c=document.getElementById(`${id}-chevron`);
+  const h=b.style.display==='none';
+  b.style.display=h?(id==='settings'?'block':'block'):'none';
+  c.textContent=h?'▲ collapse':'▼ expand';
+  if(id==='settings'&&h)document.getElementById('settings-body').style.display='block';
+}
+
+function onSlider(k){
+  const v=parseInt(document.getElementById(`sl-${k}`).value);
+  if(k==='fold'){settings.foldDownDays=v;document.getElementById('sv-fold').textContent=`${v} days`;}
+  if(k==='gap'){settings.clusterGapDays=v;document.getElementById('sv-gap').textContent=`${v} days`;}
+  if(k==='imp'){settings.globalImpairment=v===0?null:v/100;document.getElementById('sv-imp').textContent=v===0?'Per-Tool':`${v}%`;}
+  recompute();
+}
+
+function toggleRamp(){
+  settings.useRamp=!settings.useRamp;
+  const e=document.getElementById('tgl-ramp');e.classList.toggle('on',settings.useRamp);
+  document.getElementById('tgl-ramp-lbl').textContent=settings.useRamp?'ON — weights impact by new hire ramp':'OFF — flat daily impact';
+  recompute();
+}
+
+function toggleRejected(){
+  settings.countRejected=!settings.countRejected;
+  const e=document.getElementById('tgl-rej');e.classList.toggle('on',settings.countRejected);
+  document.getElementById('tgl-rej-lbl').textContent=settings.countRejected?'ON — blocked access counts to day 90':'OFF — rejected requests excluded from impact';
+  recompute();
+}
+
+function setMode(m){
+  dataMode=m;
+  document.getElementById('tab-demo').classList.toggle('active',m==='demo');
+  document.getElementById('tab-csv').classList.toggle('active',m==='csv');
+  document.getElementById('csv-import').style.display=m==='csv'?'block':'none';
+  document.getElementById('demo-note').style.display=m==='demo'?'block':'none';
+  if(m==='demo'){allEmployees=generateSynthetic();document.getElementById('hdr-mode').textContent='📊 Demo Data';rebuildUI();recompute();}
+}
+
+// ─── LOADING OVERLAY ───
+function showLoading(msg){
+  let ol=document.getElementById('loading-overlay');
+  if(!ol){
+    ol=document.createElement('div');ol.id='loading-overlay';
+    ol.style.cssText='position:fixed;inset:0;background:rgba(255,255,255,.88);z-index:9999;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px';
+    ol.innerHTML=`<div style="width:44px;height:44px;border:4px solid #e2e8f0;border-top-color:#2563eb;border-radius:50%;animation:spin 0.9s linear infinite"></div>
+      <div id="loading-msg" style="font-weight:700;color:#2563eb;font-size:14px">${msg||'Computing…'}</div>
+      <div style="font-size:11px;color:#64748b">Large datasets may take a moment</div>`;
+    document.body.appendChild(ol);
+  }else{
+    ol.style.display='flex';
+    document.getElementById('loading-msg').textContent=msg||'Computing…';
+  }
+}
+function hideLoading(){const ol=document.getElementById('loading-overlay');if(ol)ol.style.display='none';}
+
+function recompute(){
+  settings.defaultRevenue=parseFloat(document.getElementById('inp-rev').value)||1e6;
+  settings.burdenRate=parseFloat(document.getElementById('inp-burden').value)||1.3;
+  settings.defaultSalary=parseFloat(document.getElementById('inp-salary').value)||1e5;
+  if(dataMode==='demo'){
+    const nodes=document.getElementById('demo-rev-nodes').value;
+    revOrgL5Nodes=new Set(nodes.split(',').map(s=>s.trim().toLowerCase()).filter(Boolean));
+    allEmployees.forEach(e=>{e.isRevenueGenerator=revOrgL5Nodes.has((e['org-l5']||'').toLowerCase());});
+  }
+  expandedRows.clear();
+  const n=allEmployees.length;
+  if(n>200) showLoading(`Computing impact for ${n.toLocaleString()} employees…`);
+  setTimeout(()=>{computeAll();applyFilters();hideLoading();},n>200?30:0);
+}
+
+// ═══════════════════════════════════════════════════════════
+// POPULATE FILTERS & REBUILD UI
+// ═══════════════════════════════════════════════════════════
+function populateSel(id, vals, allLabel='All'){
+  const sel=document.getElementById(id);
+  if(!sel) return;
+  const prev=sel.value;
+  sel.innerHTML=`<option value="">${allLabel}</option>`+
+    vals.map(v=>`<option value="${v}"${v===prev?' selected':''}>${v}</option>`).join('');
+}
+
+function rebuildOrgDropdowns(emps){
+  ['l2','l3','l4','l5','l6'].forEach(lv=>{
+    const vals=[...new Set(emps.map(e=>e[`org-${lv}`]).filter(Boolean))].sort();
+    populateSel(`f-${lv}`, vals);
+  });
+}
+
+function rebuildUI(){
+  const depts=[...new Set(allEmployees.map(e=>e.department))].sort();
+  populateSel('f-dept', depts, 'All Depts');
+
+  rebuildOrgDropdowns(allEmployees);
+
+  const qtrs=[...new Set(allEmployees.map(e=>e.hireQ))].sort();
+  populateSel('f-qtr', qtrs, 'All Quarters');
+}
+
+// ═══════════════════════════════════════════════════════════
+// FORMATTERS
+// ═══════════════════════════════════════════════════════════
+function fmtDollar(n){
+  if(n>=1e6)return`$${(n/1e6).toFixed(2)}M`;
+  if(n>=1e3)return`$${Math.round(n/1e3)}K`;
+  return`$${Math.round(n)}`;
+}
+function fmtDollarS(n){
+  if(n>=1e6)return`$${(n/1e6).toFixed(1)}M`;
+  if(n>=1e3)return`$${(n/1e3).toFixed(0)}K`;
+  return`$${n}`;
+}
+
+// ═══════════════════════════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════════════════════════
+function init(){
+  allEmployees=generateSynthetic();
+  rebuildUI();computeAll();
+  filteredEmployees=[...computedEmployees];
+  applyFilters();
+}
+document.addEventListener('DOMContentLoaded',init);
+</script>
+</body>
+</html>
